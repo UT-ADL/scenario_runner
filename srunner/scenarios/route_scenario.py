@@ -142,7 +142,7 @@ class RouteScenario(BasicScenario):
     along which several smaller scenarios are triggered
     """
 
-    def __init__(self, world, config, debug_mode=False, criteria_enable=True, timeout=300):
+    def __init__(self, world, config, ego_vehicles=[], debug_mode=False, criteria_enable=True, timeout=300):
         """
         Setup all relevant parameters and create scenarios along route
         """
@@ -153,7 +153,9 @@ class RouteScenario(BasicScenario):
 
         self._update_route(world, config, debug_mode)
 
-        ego_vehicle = self._update_ego_vehicle()
+        # For a given route, use the first ego_vehicle as the one to follow the route
+        ego_vehicle = ego_vehicles[0] if len(ego_vehicles) > 0 else None 
+        ego_vehicle = self._update_ego_vehicle(ego_vehicle)
 
         self.list_scenarios = self._build_scenario_instances(world,
                                                              ego_vehicle,
@@ -203,7 +205,7 @@ class RouteScenario(BasicScenario):
         if debug_mode:
             self._draw_waypoints(world, self.route, vertical_shift=1.0, persistency=50000.0)
 
-    def _update_ego_vehicle(self):
+    def _update_ego_vehicle(self, ego_vehicle):
         """
         Set/Update the start position of the ego_vehicle
         """
@@ -211,7 +213,10 @@ class RouteScenario(BasicScenario):
         elevate_transform = self.route[0][0]
         elevate_transform.location.z += 0.5
 
-        ego_vehicle = CarlaDataProvider.request_new_actor('vehicle.lincoln.mkz_2017',
+        if ego_vehicle:
+            ego_vehicle.set_transform(elevate_transform)
+        else:
+            ego_vehicle = CarlaDataProvider.request_new_actor('vehicle.lincoln.mkz_2017',
                                                           elevate_transform,
                                                           rolename='hero')
 
