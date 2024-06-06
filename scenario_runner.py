@@ -305,22 +305,22 @@ class ScenarioRunner(object):
 
         if self._args.reloadWorld:
             self.world = self.client.load_world(town)
-        else:
-            # if the world should not be reloaded, wait at least until all ego vehicles are ready
-            ego_vehicle_found = False
-            if self._args.waitForEgo:
-                while not ego_vehicle_found and not self._shutdown_requested:
-                    vehicles = self.client.get_world().get_actors().filter('vehicle.*')
-                    for ego_vehicle in ego_vehicles:
-                        ego_vehicle_found = False
-                        for vehicle in vehicles:
-                            if vehicle.attributes['role_name'] == ego_vehicle.rolename:
-                                ego_vehicle_found = True
-                                break
-                        if not ego_vehicle_found:
-                            print("Not all ego vehicles ready. Waiting ... ")
-                            time.sleep(1)
+
+        # if waitForEgo then wait until all ego vehicles are ready
+        ego_vehicle_found = False
+        if self._args.waitForEgo:
+            while not ego_vehicle_found and not self._shutdown_requested:
+                vehicles = self.client.get_world().get_actors().filter('vehicle.*')
+                for ego_vehicle in ego_vehicles:
+                    ego_vehicle_found = False
+                    for vehicle in vehicles:
+                        if vehicle.attributes['role_name'] == ego_vehicle.rolename:
+                            ego_vehicle_found = True
                             break
+                    if not ego_vehicle_found:
+                        print("Not all ego vehicles ready. Waiting ... ")
+                        time.sleep(1)
+                        break
 
         self.world = self.client.get_world()
 
