@@ -551,7 +551,7 @@ def main():
         '--agent', help="Agent used to execute the scenario. Currently only compatible with route-based scenarios.")
     parser.add_argument('--agentConfig', type=str, help="Path to Agent's configuration file", default="")
 
-    parser.add_argument('--output', default=True, help='Provide results on stdout')
+    parser.add_argument('--output', action="store_true", help='Provide results on stdout')
     parser.add_argument('--file', action="store_true", help='Write results into a txt file')
     parser.add_argument('--junit', action="store_true", help='Write results into a junit file')
     parser.add_argument('--json', action="store_true", help='Write results into a JSON file')
