@@ -67,12 +67,13 @@ class RouteScenario(BasicScenario):
         self.route = self._get_route(config)
         sampled_scenario_definitions = self._filter_scenarios(config.scenario_configs)
 
-        ego_vehicle = self._spawn_ego_vehicle()
-        self.timeout = self._estimate_route_timeout()
 
         # For a given route, use the first ego_vehicle as the one to follow the route
         ego_vehicle = ego_vehicles[0] if len(ego_vehicles) > 0 else None 
         ego_vehicle = self._update_ego_vehicle(ego_vehicle)
+
+        self.timeout = self._estimate_route_timeout()
+        
         if debug_mode:
             self._draw_waypoints(world, self.route, vertical_shift=0.1, size=0.1, persistency=self.timeout, downsample=5)
 
