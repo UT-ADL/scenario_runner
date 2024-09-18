@@ -135,38 +135,57 @@ def get_crossing_point(actor):
     return crossing
 
 
-def get_geometric_linear_intersection(ego_actor, other_actor):
+def get_geometric_linear_intersection(ego_location, other_location, move_to_junction=False):
     """
     Obtain a intersection point between two actor's location by using their waypoints (wp)
 
     @return point of intersection of the two vehicles
     """
 
-    wp_ego_1 = CarlaDataProvider.get_map().get_waypoint(ego_actor.get_location())
+    wp_ego_1 = CarlaDataProvider.get_map().get_waypoint(ego_location)
     wp_ego_2 = wp_ego_1.next(1)[0]
-    x_ego_1 = wp_ego_1.transform.location.x
-    y_ego_1 = wp_ego_1.transform.location.y
-    x_ego_2 = wp_ego_2.transform.location.x
-    y_ego_2 = wp_ego_2.transform.location.y
 
-    wp_other_1 = CarlaDataProvider.get_world().get_map().get_waypoint(other_actor.get_location())
+    if move_to_junction:
+        while True:
+            next_wp = wp_ego_2.next(1)[0]
+            if next_wp.is_junction:
+                break
+            else:
+                wp_ego_1 = wp_ego_2
+                wp_ego_2 = next_wp
+
+    ego_1_loc = wp_ego_1.transform.location
+    ego_2_loc = wp_ego_2.transform.location
+
+    wp_other_1 = CarlaDataProvider.get_world().get_map().get_waypoint(other_location)
     wp_other_2 = wp_other_1.next(1)[0]
-    x_other_1 = wp_other_1.transform.location.x
-    y_other_1 = wp_other_1.transform.location.y
-    x_other_2 = wp_other_2.transform.location.x
-    y_other_2 = wp_other_2.transform.location.y
 
-    s = np.vstack([(x_ego_1, y_ego_1), (x_ego_2, y_ego_2), (x_other_1, y_other_1), (x_other_2, y_other_2)])
+    if move_to_junction:
+        while True:
+            next_wp = wp_other_2.next(1)[0]
+            if next_wp.is_junction:
+                break
+            else:
+                wp_other_1 = wp_other_2
+                wp_other_2 = next_wp
+
+    other_1_loc = wp_other_1.transform.location
+    other_2_loc = wp_other_2.transform.location
+
+    s = np.vstack([
+        (ego_1_loc.x, ego_1_loc.y),
+        (ego_2_loc.x, ego_2_loc.y),
+        (other_1_loc.x, other_1_loc.y),
+        (other_2_loc.x, other_2_loc.y)
+    ])
     h = np.hstack((s, np.ones((4, 1))))
     line1 = np.cross(h[0], h[1])
     line2 = np.cross(h[2], h[3])
     x, y, z = np.cross(line1, line2)
     if z == 0:
-        return (float('inf'), float('inf'))
+        return None
 
-    intersection = carla.Location(x=x / z, y=y / z, z=0)
-
-    return intersection
+    return carla.Location(x=x/z, y=y/z, z=0)
 
 
 def get_location_in_distance(actor, distance):
@@ -206,17 +225,21 @@ def get_location_in_distance_from_wp(waypoint, distance, stop_at_junction=True):
     return waypoint.transform.location, traveled_distance
 
 
-def get_waypoint_in_distance(waypoint, distance):
+def get_waypoint_in_distance(waypoint, distance, stop_at_junction=True):
     """
     Obtain a waypoint in a given distance from the current actor's location.
     Note: Search is stopped on first intersection.
     @return obtained waypoint and the traveled distance
     """
     traveled_distance = 0
-    while not waypoint.is_intersection and traveled_distance < distance:
-        waypoint_new = waypoint.next(1.0)[-1]
-        traveled_distance += waypoint_new.transform.location.distance(waypoint.transform.location)
-        waypoint = waypoint_new
+    while not (waypoint.is_intersection and stop_at_junction) and traveled_distance < distance:
+        wp_next = waypoint.next(1.0)
+        if wp_next:
+            waypoint_new = wp_next[-1]
+            traveled_distance += waypoint_new.transform.location.distance(waypoint.transform.location)
+            waypoint = waypoint_new
+        else:
+            break
 
     return waypoint, traveled_distance
 
@@ -368,28 +391,27 @@ def generate_target_waypoint_in_route(waypoint, route):
     This method follow waypoints to a junction
     @returns a waypoint list according to turn input
     """
+    target_waypoint = None
     wmap = CarlaDataProvider.get_map()
     reached_junction = False
 
     # Get the route location
     shortest_distance = float('inf')
     for index, route_pos in enumerate(route):
-        wp = route_pos[0]
+        route_location = route_pos[0].location
         trigger_location = waypoint.transform.location
 
-        dist_to_route = trigger_location.distance(wp)
+        dist_to_route = trigger_location.distance(route_location)
         if dist_to_route <= shortest_distance:
             closest_index = index
             shortest_distance = dist_to_route
 
-    route_location = route[closest_index][0]
+    route_location = route[closest_index][0].location
     index = closest_index
 
-    while True:
-        # Get the next route location
-        index = min(index + 1, len(route))
-        route_location = route[index][0]
-        road_option = route[index][1]
+    for i in range(index, len(route)):
+        route_location = route[i][0].location
+        road_option = route[i][1]
 
         # Enter the junction
         if not reached_junction and (road_option in (RoadOption.LEFT, RoadOption.RIGHT, RoadOption.STRAIGHT)):
@@ -397,9 +419,10 @@ def generate_target_waypoint_in_route(waypoint, route):
 
         # End condition for the behavior, at the end of the junction
         if reached_junction and (road_option not in (RoadOption.LEFT, RoadOption.RIGHT, RoadOption.STRAIGHT)):
+            target_waypoint = route_location
             break
 
-    return wmap.get_waypoint(route_location)
+    return wmap.get_waypoint(target_waypoint)
 
 
 def choose_at_junction(current_waypoint, next_choices, direction=0):
@@ -469,8 +492,7 @@ def detect_lane_obstacle(actor, extension_factor=3, margin=1.02):
     """
     This function identifies if an obstacle is present in front of the reference actor
     """
-    world = CarlaDataProvider.get_world()
-    world_actors = world.get_actors().filter('vehicle.*')
+    world_actors = CarlaDataProvider.get_all_actors().filter('vehicle.*')
     actor_bbox = actor.bounding_box
     actor_transform = actor.get_transform()
     actor_location = actor_transform.location
@@ -501,6 +523,104 @@ def detect_lane_obstacle(actor, extension_factor=3, margin=1.02):
                 break
 
     return is_hazard
+
+
+def get_junction_topology(junction):
+    """
+    Given a junction, returns a two list of waypoints corresponding to the entry
+    and exit lanes of the junction
+    """
+    def get_lane_key(waypoint):
+        return str(waypoint.road_id) + '*' + str(waypoint.lane_id)
+
+    def get_junction_entry_wp(entry_wp):
+        while entry_wp.is_junction:
+            entry_wps = entry_wp.previous(0.2)
+            if len(entry_wps) == 0:
+                return None
+            entry_wp = entry_wps[0]
+        return entry_wp
+
+    def get_junction_exit_wp(exit_wp):
+        while exit_wp.is_junction:
+            exit_wps = exit_wp.next(0.2)
+            if len(exit_wps) == 0:
+                return None
+            exit_wp = exit_wps[0]
+        return exit_wp
+
+    used_entry_lanes = []
+    used_exit_lanes = []
+    entry_wps = []
+    exit_wps = []
+    for entry_wp, exit_wp in junction.get_waypoints(carla.LaneType.Driving):
+        entry_wp = get_junction_entry_wp(entry_wp)
+        if not entry_wp:
+            continue
+        if get_lane_key(entry_wp) not in used_entry_lanes:
+            used_entry_lanes.append(get_lane_key(entry_wp))
+            entry_wps.append(entry_wp)
+
+        exit_wp = get_junction_exit_wp(exit_wp)
+        if not exit_wp:
+            continue
+        if get_lane_key(exit_wp) not in used_exit_lanes:
+            used_exit_lanes.append(get_lane_key(exit_wp))
+            exit_wps.append(exit_wp)
+
+    return entry_wps, exit_wps
+
+
+def filter_junction_wp_direction(reference_wp, wp_list, direction='opposite'):
+    """
+    Given a list of entry / exit wps of a junction, filters them according to a specific direction,
+    returning all waypoint part of lanes that are at 'direction' with respect to the reference.
+    This might fail for complex junctions, as only the wp yaws is checked, not their relative positions
+    """
+
+    filtered_wps = []
+    reference_yaw = reference_wp.transform.rotation.yaw
+    for wp in wp_list:
+        diff = (wp.transform.rotation.yaw - reference_yaw) % 360
+        if diff > 330.0:
+            wp_direction = 'ref'
+        elif diff > 225.0:
+            wp_direction = 'right'
+        elif diff > 135.0:
+            wp_direction = 'opposite'
+        elif diff > 30.0:
+            wp_direction = 'left'
+        else:
+            wp_direction = 'ref'
+
+        if wp_direction == direction:
+            filtered_wps.append(wp)
+
+    return filtered_wps
+
+
+def get_closest_traffic_light(waypoint, traffic_lights=None):
+    """
+    Returns the traffic light closest to the waypoint. The distance is computed between the
+    waypoint and the traffic light's bounding box.
+    Checks all traffic lights part of 'traffic_lights', or all the town ones, if None are passed.
+    """
+    if not traffic_lights:
+        traffic_lights = CarlaDataProvider.get_all_actors().filter('*traffic_light*')
+
+    closest_dist = float('inf')
+    closest_tl = None
+
+    wp_location = waypoint.transform.location
+    for tl in traffic_lights:
+        tl_waypoints = tl.get_stop_waypoints()
+        for tl_waypoint in tl_waypoints:
+            distance = wp_location.distance(tl_waypoint.transform.location)
+            if distance < closest_dist:
+                closest_dist = distance
+                closest_tl = tl
+
+    return closest_tl
 
 
 def get_offset_transform(transform, offset):
@@ -554,7 +674,7 @@ def get_troad_from_transform(actor_transform):
                                                                       rm_lane.transform.rotation),
                                                       rm_lane_offset).location.distance(actor_loc)
     t_road = ref_lane.transform.location.distance(actor_loc)
-    if right_lanes == [] or left_lanes == []:
+    if not right_lanes or not left_lanes:
         closest_road_edge = min(distance_from_lm_lane_edge, distance_from_rm_lane_edge)
         if closest_road_edge == distance_from_lm_lane_edge:
             t_road = -1*t_road
@@ -615,6 +735,71 @@ def get_distance_between_actors(current, target, distance_type="euclidianDistanc
     distance = 0.0 if distance < 0.0 else distance
 
     return distance
+
+
+def get_same_dir_lanes(waypoint):
+    """
+    Gets all the lanes with the same direction of the road of a wp.
+    Ordered from the edge lane to the center one (from outwards to inwards)
+    """
+    same_dir_wps = [waypoint]
+
+    # Check roads on the right
+    right_wp = waypoint
+    while True:
+        possible_right_wp = right_wp.get_right_lane()
+        if possible_right_wp is None or possible_right_wp.lane_type != carla.LaneType.Driving:
+            break
+        right_wp = possible_right_wp
+        same_dir_wps.append(right_wp)
+
+    # Check roads on the left
+    left_wp = waypoint
+    while True:
+        possible_left_wp = left_wp.get_left_lane()
+        if possible_left_wp is None or possible_left_wp.lane_type != carla.LaneType.Driving:
+            break
+        if possible_left_wp.lane_id * left_wp.lane_id < 0:
+            break
+        left_wp = possible_left_wp
+        same_dir_wps.insert(0, left_wp)
+
+    return same_dir_wps
+
+
+def get_opposite_dir_lanes(waypoint):
+    """
+    Gets all the lanes with opposite direction of the road of a wp
+    Ordered from the center lane to the edge one (from inwards to outwards)
+    """
+    other_dir_wps = []
+    other_dir_wp = None
+
+    # Get the first lane of the opposite direction
+    left_wp = waypoint
+    while True:
+        possible_left_wp = left_wp.get_left_lane()
+        if possible_left_wp is None:
+            break
+        if possible_left_wp.lane_id * left_wp.lane_id < 0:
+            other_dir_wp = possible_left_wp
+            break
+        left_wp = possible_left_wp
+
+    if not other_dir_wp:
+        return other_dir_wps
+
+    # Check roads on the right
+    right_wp = other_dir_wp
+    while True:
+        if right_wp.lane_type == carla.LaneType.Driving:
+            other_dir_wps.append(right_wp)
+        possible_right_wp = right_wp.get_right_lane()
+        if possible_right_wp is None:
+            break
+        right_wp = possible_right_wp
+
+    return other_dir_wps
 
 
 class RotatedRectangle(object):
