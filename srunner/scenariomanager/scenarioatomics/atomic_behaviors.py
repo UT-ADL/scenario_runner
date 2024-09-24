@@ -33,6 +33,7 @@ import carla
 from agents.navigation.basic_agent import BasicAgent
 from agents.navigation.constant_velocity_agent import ConstantVelocityAgent
 from agents.navigation.local_planner import RoadOption, LocalPlanner
+from agents.navigation.global_route_planner import GlobalRoutePlanner
 from agents.tools.misc import is_within_distance, get_speed
 
 from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
@@ -4425,7 +4426,7 @@ class ScenarioTriggerer(AtomicBehavior):
 
         # Check which scenarios can be triggered
         blackboard = py_trees.blackboard.Blackboard()
-        for black_var_name, scen_location, scen_name in self._blackboard_list:
+        for black_var_name, scen_location in self._blackboard_list:
 
             # Close enough
             scen_distance = route_location.distance(scen_location)
@@ -4441,8 +4442,6 @@ class ScenarioTriggerer(AtomicBehavior):
             if condition1 and condition2 and condition3:
                 _ = blackboard.set(black_var_name, True)
                 self._triggered_scenarios.append(black_var_name)
-
-                CarlaDataProvider.set_latest_scenario(scen_name)
 
                 if self._debug:
                     self._world.debug.draw_point(
