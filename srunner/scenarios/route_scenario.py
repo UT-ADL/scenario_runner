@@ -58,7 +58,7 @@ class RouteScenario(BasicScenario):
     along which several smaller scenarios are triggered
     """
 
-    def __init__(self, world, config, debug_mode=False, criteria_enable=True, timeout=300):
+    def __init__(self, world, config, ego_vehicles=[], debug_mode=False, criteria_enable=True, timeout=300):
         """
         Setup all relevant parameters and create scenarios along route
         """
@@ -67,11 +67,13 @@ class RouteScenario(BasicScenario):
         self.route = self._get_route(config)
         sampled_scenario_definitions = self._filter_scenarios(config.scenario_configs)
 
-        ego_vehicle = self._spawn_ego_vehicle()
-        self.timeout = self._estimate_route_timeout()
-
         if debug_mode:
             self._draw_waypoints(world, self.route, vertical_shift=0.1, size=0.1, persistency=self.timeout, downsample=5)
+        # For a given route, use the first ego_vehicle as the one to follow the route
+        ego_vehicle = ego_vehicles[0] if len(ego_vehicles) > 0 else None 
+        ego_vehicle = self._update_ego_vehicle(ego_vehicle)
+        
+        self.timeout = self._estimate_route_timeout()
 
         self._build_scenarios(
             world, ego_vehicle, sampled_scenario_definitions, timeout=self.timeout, debug=debug_mode > 0
@@ -123,6 +125,23 @@ class RouteScenario(BasicScenario):
         elevate_transform.location.z += 0.5
 
         ego_vehicle = CarlaDataProvider.request_new_actor('vehicle.lincoln.mkz_2017',
+                                                          elevate_transform,
+                                                          rolename='hero')
+
+        return ego_vehicle
+    
+    def _update_ego_vehicle(self, ego_vehicle):
+        """
+        Set/Update the start position of the ego_vehicle
+        """
+        # move ego to correct position
+        elevate_transform = self.route[0][0]
+        elevate_transform.location.z += 0.5
+
+        if ego_vehicle:
+            ego_vehicle.set_transform(elevate_transform)
+        else:
+            ego_vehicle = CarlaDataProvider.request_new_actor('vehicle.lincoln.mkz_2017',
                                                           elevate_transform,
                                                           rolename='hero')
 
