@@ -58,22 +58,25 @@ class RouteScenario(BasicScenario):
     along which several smaller scenarios are triggered
     """
 
-    def __init__(self, world, config, ego_vehicles=[], debug_mode=False, criteria_enable=True, timeout=600):
+    def __init__(self, world, config, ego_vehicles=[], debug_mode=False, criteria_enable=True, timeout=300, waitForEgo=False):
         """
         Setup all relevant parameters and create scenarios along route
         """
 
         self.config = config
+        self.waitForEgo = waitForEgo  # Store the waitForEgo flag
         self.route = self._get_route(config)
         sampled_scenario_definitions = self._filter_scenarios(config.scenario_configs)
 
-        if debug_mode:
-            self._draw_waypoints(world, self.route, vertical_shift=0.1, size=0.1, persistency=self.timeout, downsample=5)
         # For a given route, use the first ego_vehicle as the one to follow the route
         ego_vehicle = ego_vehicles[0] if len(ego_vehicles) > 0 else None 
         ego_vehicle = self._update_ego_vehicle(ego_vehicle)
         
-        self.timeout = self._estimate_route_timeout()
+        self.timeout = self._estimate_route_timeout()  # Define timeout first
+
+        # Now we can use self.timeout
+        if debug_mode:
+            self._draw_waypoints(world, self.route, vertical_shift=0.1, size=0.1, persistency=self.timeout, downsample=5)
 
         self._build_scenarios(
             world, ego_vehicle, sampled_scenario_definitions, timeout=self.timeout, debug=debug_mode > 0
@@ -134,7 +137,11 @@ class RouteScenario(BasicScenario):
         """
         Set/Update the start position of the ego_vehicle
         """
-        # move ego to correct position
+        # If waitForEgo is true and we already have a vehicle, don't reposition it
+        if self.waitForEgo and ego_vehicle:
+            return ego_vehicle
+        
+        # Original code for non-waitForEgo mode
         elevate_transform = self.route[0][0]
         elevate_transform.location.z += 0.5
 
@@ -204,27 +211,39 @@ class RouteScenario(BasicScenario):
         return sampled_scenarios
 
     def get_all_scenario_classes(self):
-
-        # Path of all scenario at "srunner/scenarios" folder
-        scenarios_list = glob.glob("{}/srunner/scenarios/*.py".format(os.getenv('SCENARIO_RUNNER_ROOT', "./")))
+        """
+        Get all the scenario classes from the original scenarios folder and from the custom folder
+        """
+        # Path of all scenarios at "srunner/scenarios" folder and custom folder
+        original_scenarios = glob.glob("{}/srunner/scenarios/*.py".format(os.getenv('SCENARIO_RUNNER_ROOT', "./")))
+        custom_scenarios = glob.glob(os.path.expanduser("~/autoware_mini_ws/src/autoware_mini/data/scenarios/tartu_demo/*.py"))
+        scenarios_list = original_scenarios + custom_scenarios
 
         all_scenario_classes = {}
 
         for scenario_file in scenarios_list:
+            if not scenario_file or not os.path.exists(scenario_file):
+                continue
 
             # Get their module
             module_name = os.path.basename(scenario_file).split('.')[0]
             sys.path.insert(0, os.path.dirname(scenario_file))
-            scenario_module = importlib.import_module(module_name)
+            try:
+                scenario_module = importlib.import_module(module_name)
 
-            # And their members of type class
-            for member in inspect.getmembers(scenario_module, inspect.isclass):
-                # TODO: Filter out any class that isn't a child of BasicScenario
-                all_scenario_classes[member[0]] = member[1]
+                # And their members of type class
+                for member in inspect.getmembers(scenario_module, inspect.isclass):
+                    # TODO: Filter out any class that isn't a child of BasicScenario
+                    all_scenario_classes[member[0]] = member[1]
+            except Exception as e:
+                print(f"Warning: Could not import scenario file {scenario_file}. Error: {e}")
+            finally:
+                # Remove unused Python paths
+                sys.path.pop(0)
 
         return all_scenario_classes
 
-    def _build_scenarios(self, world, ego_vehicle, scenario_definitions, scenarios_per_tick=5, timeout=600, debug=False):
+    def _build_scenarios(self, world, ego_vehicle, scenario_definitions, scenarios_per_tick=5, timeout=300, debug=False):
         """
         Initializes the class of all the scenarios that will be present in the route.
         If a class fails to be initialized, a warning is printed but the route execution isn't stopped
@@ -303,7 +322,7 @@ class RouteScenario(BasicScenario):
         behavior.add_child(scenario_triggerer)  # Tick the ScenarioTriggerer before the scenarios
 
         # Add the Background Activity
-        # behavior.add_child(BackgroundBehavior(self.ego_vehicles[0], self.route, name="BackgroundActivity"))
+        #behavior.add_child(BackgroundBehavior(self.ego_vehicles[0], self.route, name="BackgroundActivity"))
 
         behavior.add_children(scenario_behaviors)
         return behavior

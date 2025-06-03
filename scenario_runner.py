@@ -581,6 +581,9 @@ def main():
     parser.add_argument('--list', action="store_true", help='List all supported scenarios and exit')
     parser.add_argument('--frameRate', default='20', type=float,
                         help='Frame rate (Hz) to use in \'sync\' mode (default: 20)')
+    # Add the new waypoints flag
+    parser.add_argument('--waypoints', action="store_true", 
+                        help='Draw all route visualizations (waypoints, markers, speed indicators)')
 
     parser.add_argument(
         '--scenario', help='Name of the scenario to be executed. Use the preposition \'group:\' to run all scenarios of one class, e.g. ControlLoss or FollowLeadingVehicle')
@@ -605,6 +608,8 @@ def main():
     parser.add_argument('--debug', action="store_true", help='Run with debug output')
     parser.add_argument('--reloadWorld', action="store_true",
                         help='Reload the CARLA world before starting a scenario (default=True)')
+    parser.add_argument('--noReloadWorld', action="store_true",
+                        help='Do not reload the CARLA world before starting a scenario (overrides --reloadWorld)')
     parser.add_argument('--record', type=str, default='',
                         help='Path were the files will be saved, relative to SCENARIO_RUNNER_ROOT.\nActivates the CARLA recording feature and saves to file all the criteria information.')
     parser.add_argument('--randomize', action="store_true", help='Scenario parameters are randomized')
@@ -612,6 +617,13 @@ def main():
     parser.add_argument('--waitForEgo', action="store_true", help='Connect the scenario to an existing ego vehicle')
 
     arguments = parser.parse_args()
+    
+    # Set environment variable for waypoints flag
+    if arguments.waypoints:
+        os.environ['SCENARIO_DRAW_WAYPOINTS'] = '1'
+    else:
+        os.environ['SCENARIO_DRAW_WAYPOINTS'] = '0'
+    
     # pylint: enable=line-too-long
 
     OSC2Helper.wait_for_ego = arguments.waitForEgo
@@ -639,8 +651,10 @@ def main():
     if arguments.openscenarioparams and not arguments.openscenario:
         print("WARN: Ignoring --openscenarioparams when --openscenario is not specified")
 
-    if arguments.route:
+    if arguments.route and not arguments.noReloadWorld:
         arguments.reloadWorld = True
+    elif arguments.noReloadWorld:
+        arguments.reloadWorld = False
 
     if arguments.agent:
         arguments.sync = True
