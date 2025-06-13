@@ -1786,9 +1786,9 @@ class RunningRedLightTest(Criterion):
         wps = []
         for wpx in ini_wps:
             while not wpx.is_intersection:
-                next_wp = wpx.next(0.5)[0]
-                if next_wp and not next_wp.is_intersection:
-                    wpx = next_wp
+                next_wp = wpx.next(0.5)
+                if next_wp and not next_wp[0].is_intersection:
+                    wpx = next_wp[0]
                 else:
                     break
             wps.append(wpx)
