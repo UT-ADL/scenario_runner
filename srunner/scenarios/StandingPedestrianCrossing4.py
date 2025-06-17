@@ -39,12 +39,12 @@ class StandingPedestrianCrossing4(BasicScenario):
         
         # Set the pedestrian spawn location and heading
         self._pedestrian_spawn_point = carla.Location(x=6, y=-90, z=36.0)
-        self._pedestrian_heading = -10  # in degrees, as requested
+        self._pedestrian_heading = -6  # in degrees, as requested
         
         # Scenario parameters
         self._adversary_speed = 1.5     # Speed of the pedestrian [m/s]
         self._crossing_distance = 23.0  # Distance to cross [m]
-        self._idle_time = 0           # Idle time before starting to walk [s]
+        self._idle_time = 2.5          # Idle time before starting to walk [s]
         
         # Initialize randomness if needed
         if randomize:
