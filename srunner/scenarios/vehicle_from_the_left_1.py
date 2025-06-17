@@ -46,7 +46,7 @@ class VehicleFromTheLeft1(BasicScenario):
         self._initial_speed = 40  # km/h
         self._waypoint_list = [
             # Format: [x, y, z, speed_km_h]
-            [21, 150, 34, 70],
+            [21, 150, 34, 20],
             [36, 180, 34, 30],
             [72.5, 270, 34, 70]]
         self._active_waypoints = []
