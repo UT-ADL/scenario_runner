@@ -64,6 +64,8 @@ class RouteScenario(BasicScenario):
         """
 
         self.config = config
+        # Store additional scenario path for use in get_all_scenario_classes
+        self.config.additional_scenario_path = getattr(config, 'additional_scenario_path', None)
         self.route = self._get_route(config)
         sampled_scenario_definitions = self._filter_scenarios(config.scenario_configs)
 
@@ -207,20 +209,41 @@ class RouteScenario(BasicScenario):
 
         # Path of all scenario at "srunner/scenarios" folder
         scenarios_list = glob.glob("{}/srunner/scenarios/*.py".format(os.getenv('SCENARIO_RUNNER_ROOT', "./")))
+        
+        # Add additional scenarios from command line argument
+        if hasattr(self.config, 'additional_scenario_path') and self.config.additional_scenario_path:
+            additional_path = os.path.expanduser(self.config.additional_scenario_path)
+            if os.path.isfile(additional_path):
+                scenarios_list.append(additional_path)
+            elif os.path.isdir(additional_path):
+                additional_scenarios = glob.glob("{}/*.py".format(additional_path))
+                scenarios_list.extend(additional_scenarios)
 
         all_scenario_classes = {}
 
         for scenario_file in scenarios_list:
+            if scenario_file.endswith('__init__.py'):
+                continue
 
             # Get their module
             module_name = os.path.basename(scenario_file).split('.')[0]
-            sys.path.insert(0, os.path.dirname(scenario_file))
-            scenario_module = importlib.import_module(module_name)
+            original_path = sys.path[:]
+            try:
+                sys.path.insert(0, os.path.dirname(scenario_file))
+                scenario_module = importlib.import_module(module_name)
 
-            # And their members of type class
-            for member in inspect.getmembers(scenario_module, inspect.isclass):
-                # TODO: Filter out any class that isn't a child of BasicScenario
-                all_scenario_classes[member[0]] = member[1]
+                # And their members of type class
+                for member in inspect.getmembers(scenario_module, inspect.isclass):
+                    if len(member) >= 2 and hasattr(member[1], '__bases__'):
+                        try:
+                            if issubclass(member[1], BasicScenario) and member[1] != BasicScenario:
+                                all_scenario_classes[member[0]] = member[1]
+                        except TypeError:
+                            pass
+            except Exception:
+                pass
+            finally:
+                sys.path[:] = original_path
 
         return all_scenario_classes
 
@@ -232,15 +255,6 @@ class RouteScenario(BasicScenario):
         all_scenario_classes = self.get_all_scenario_classes()
         self.list_scenarios = []
         ego_data = ActorConfigurationData(ego_vehicle.type_id, ego_vehicle.get_transform(), 'hero')
-
-        if debug:
-            tmap = CarlaDataProvider.get_map()
-            for scenario_config in scenario_definitions:
-                scenario_loc = scenario_config.trigger_points[0].location
-                debug_loc = tmap.get_waypoint(scenario_loc).transform.location + carla.Location(z=0.2)
-                world.debug.draw_point(debug_loc, size=0.2, color=carla.Color(128, 0, 0), life_time=timeout)
-                world.debug.draw_string(debug_loc, str(scenario_config.name), draw_shadow=False,
-                                        color=carla.Color(0, 0, 128), life_time=timeout, persistent_lines=True)
 
         for scenario_number, scenario_config in enumerate(scenario_definitions):
             scenario_config.ego_vehicles = [ego_data]

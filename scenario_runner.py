@@ -159,9 +159,19 @@ class ScenarioRunner(object):
 
         # Path of all scenario at "srunner/scenarios" folder + the path of the additional scenario argument
         scenarios_list = glob.glob("{}/srunner/scenarios/*.py".format(os.getenv('SCENARIO_RUNNER_ROOT', "./")))
-        scenarios_list.append(self._args.additionalScenario)
+        
+        # Handle additional scenarios - can be a file or folder
+        if self._args.additionalScenario:
+            additional_path = os.path.expanduser(self._args.additionalScenario)
+            if os.path.isfile(additional_path):
+                scenarios_list.append(additional_path)
+            elif os.path.isdir(additional_path):
+                additional_scenarios = glob.glob("{}/*.py".format(additional_path))
+                scenarios_list.extend(additional_scenarios)
 
         for scenario_file in scenarios_list:
+            if scenario_file.endswith('__init__.py'):
+                continue
 
             # Get their module
             module_name = os.path.basename(scenario_file).split('.')[0]
@@ -491,6 +501,9 @@ class ScenarioRunner(object):
         route_configurations = RouteParser.parse_routes_file(self._args.route, self._args.route_id)
 
         for config in route_configurations:
+            # Pass additional scenario path to config
+            if self._args.additionalScenario:
+                config.additional_scenario_path = os.path.expanduser(self._args.additionalScenario)
             for _ in range(self._args.repetitions):
                 result = self._load_and_run_scenario(config)
 
@@ -603,7 +616,7 @@ def main():
     parser.add_argument('--outputDir', default='', help='Directory for output files (default: this directory)')
 
     parser.add_argument('--configFile', default='', help='Provide an additional scenario configuration file (*.xml)')
-    parser.add_argument('--additionalScenario', default='', help='Provide additional scenario implementations (*.py)')
+    parser.add_argument('--additionalScenario', default='', help='Provide additional scenario implementations (*.py) or folder path containing scenarios')
 
     parser.add_argument('--debug', action="store_true", help='Run with debug output')
     parser.add_argument('--reloadWorld', action="store_true",
