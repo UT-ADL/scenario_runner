@@ -159,19 +159,9 @@ class ScenarioRunner(object):
 
         # Path of all scenario at "srunner/scenarios" folder + the path of the additional scenario argument
         scenarios_list = glob.glob("{}/srunner/scenarios/*.py".format(os.getenv('SCENARIO_RUNNER_ROOT', "./")))
-        
-        # Handle additional scenarios - can be a file or folder
-        if self._args.additionalScenario:
-            additional_path = os.path.expanduser(self._args.additionalScenario)
-            if os.path.isfile(additional_path):
-                scenarios_list.append(additional_path)
-            elif os.path.isdir(additional_path):
-                additional_scenarios = glob.glob("{}/*.py".format(additional_path))
-                scenarios_list.extend(additional_scenarios)
+        scenarios_list.append(self._args.additionalScenario)
 
         for scenario_file in scenarios_list:
-            if scenario_file.endswith('__init__.py'):
-                continue
 
             # Get their module
             module_name = os.path.basename(scenario_file).split('.')[0]
@@ -501,9 +491,6 @@ class ScenarioRunner(object):
         route_configurations = RouteParser.parse_routes_file(self._args.route, self._args.route_id)
 
         for config in route_configurations:
-            # Pass additional scenario path to config
-            if self._args.additionalScenario:
-                config.additional_scenario_path = os.path.expanduser(self._args.additionalScenario)
             for _ in range(self._args.repetitions):
                 result = self._load_and_run_scenario(config)
 
@@ -594,9 +581,6 @@ def main():
     parser.add_argument('--list', action="store_true", help='List all supported scenarios and exit')
     parser.add_argument('--frameRate', default='20', type=float,
                         help='Frame rate (Hz) to use in \'sync\' mode (default: 20)')
-    # Add the new waypoints flag
-    parser.add_argument('--waypoints', action="store_true", 
-                        help='Draw all route visualizations (waypoints, markers, speed indicators)')
 
     parser.add_argument(
         '--scenario', help='Name of the scenario to be executed. Use the preposition \'group:\' to run all scenarios of one class, e.g. ControlLoss or FollowLeadingVehicle')
@@ -616,13 +600,11 @@ def main():
     parser.add_argument('--outputDir', default='', help='Directory for output files (default: this directory)')
 
     parser.add_argument('--configFile', default='', help='Provide an additional scenario configuration file (*.xml)')
-    parser.add_argument('--additionalScenario', default='', help='Provide additional scenario implementations (*.py) or folder path containing scenarios')
+    parser.add_argument('--additionalScenario', default='', help='Provide additional scenario implementations (*.py)')
 
     parser.add_argument('--debug', action="store_true", help='Run with debug output')
     parser.add_argument('--reloadWorld', action="store_true",
                         help='Reload the CARLA world before starting a scenario (default=True)')
-    parser.add_argument('--noReloadWorld', action="store_true",
-                        help='Do not reload the CARLA world before starting a scenario (overrides --reloadWorld)')
     parser.add_argument('--record', type=str, default='',
                         help='Path were the files will be saved, relative to SCENARIO_RUNNER_ROOT.\nActivates the CARLA recording feature and saves to file all the criteria information.')
     parser.add_argument('--randomize', action="store_true", help='Scenario parameters are randomized')
@@ -630,13 +612,6 @@ def main():
     parser.add_argument('--waitForEgo', action="store_true", help='Connect the scenario to an existing ego vehicle')
 
     arguments = parser.parse_args()
-    
-    # Set environment variable for waypoints flag
-    if arguments.waypoints:
-        os.environ['SCENARIO_DRAW_WAYPOINTS'] = '1'
-    else:
-        os.environ['SCENARIO_DRAW_WAYPOINTS'] = '0'
-    
     # pylint: enable=line-too-long
 
     OSC2Helper.wait_for_ego = arguments.waitForEgo
@@ -664,10 +639,8 @@ def main():
     if arguments.openscenarioparams and not arguments.openscenario:
         print("WARN: Ignoring --openscenarioparams when --openscenario is not specified")
 
-    if arguments.route and not arguments.noReloadWorld:
+    if arguments.route:
         arguments.reloadWorld = True
-    elif arguments.noReloadWorld:
-        arguments.reloadWorld = False
 
     if arguments.agent:
         arguments.sync = True

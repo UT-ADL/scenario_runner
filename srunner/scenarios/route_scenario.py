@@ -64,8 +64,6 @@ class RouteScenario(BasicScenario):
         """
 
         self.config = config
-        # Store additional scenario path for use in get_all_scenario_classes
-        self.config.additional_scenario_path = getattr(config, 'additional_scenario_path', None)
         self.route = self._get_route(config)
         sampled_scenario_definitions = self._filter_scenarios(config.scenario_configs)
 
@@ -112,7 +110,7 @@ class RouteScenario(BasicScenario):
         """
         new_scenarios_config = []
         for scenario_config in scenario_configs:
-            trigger_point = scenario_config.trigger_points[0]
+            #trigger_point = scenario_config.trigger_points[0]
             #if not RouteParser.is_scenario_at_route(trigger_point, self.route):
                 #print("WARNING: Ignoring scenario '{}' as it is too far from the route".format(scenario_config.name))
                 #continue
@@ -209,45 +207,33 @@ class RouteScenario(BasicScenario):
 
         # Path of all scenario at "srunner/scenarios" folder
         scenarios_list = glob.glob("{}/srunner/scenarios/*.py".format(os.getenv('SCENARIO_RUNNER_ROOT', "./")))
-        
-        # Add additional scenarios from command line argument
-        if hasattr(self.config, 'additional_scenario_path') and self.config.additional_scenario_path:
-            additional_path = os.path.expanduser(self.config.additional_scenario_path)
-            if os.path.isfile(additional_path):
-                scenarios_list.append(additional_path)
-            elif os.path.isdir(additional_path):
-                additional_scenarios = glob.glob("{}/*.py".format(additional_path))
-                scenarios_list.extend(additional_scenarios)
 
+        # Add additional scenario file if provided via command line
+        try:
+            idx = sys.argv.index('--additionalScenario')
+            additional_scenario = os.path.expanduser(sys.argv[idx + 1])
+            if os.path.exists(additional_scenario):
+                scenarios_list.append(additional_scenario)
+        except (ValueError, IndexError):
+            pass  # Flag not found or no value provided
+                
         all_scenario_classes = {}
 
         for scenario_file in scenarios_list:
-            if scenario_file.endswith('__init__.py'):
-                continue
 
             # Get their module
             module_name = os.path.basename(scenario_file).split('.')[0]
-            original_path = sys.path[:]
-            try:
-                sys.path.insert(0, os.path.dirname(scenario_file))
-                scenario_module = importlib.import_module(module_name)
+            sys.path.insert(0, os.path.dirname(scenario_file))
+            scenario_module = importlib.import_module(module_name)
 
-                # And their members of type class
-                for member in inspect.getmembers(scenario_module, inspect.isclass):
-                    if len(member) >= 2 and hasattr(member[1], '__bases__'):
-                        try:
-                            if issubclass(member[1], BasicScenario) and member[1] != BasicScenario:
-                                all_scenario_classes[member[0]] = member[1]
-                        except TypeError:
-                            pass
-            except Exception:
-                pass
-            finally:
-                sys.path[:] = original_path
+            # And their members of type class
+            for member in inspect.getmembers(scenario_module, inspect.isclass):
+                # TODO: Filter out any class that isn't a child of BasicScenario
+                all_scenario_classes[member[0]] = member[1]
 
         return all_scenario_classes
 
-    def _build_scenarios(self, world, ego_vehicle, scenario_definitions, scenarios_per_tick=5, timeout=600, debug=False):
+    def _build_scenarios(self, world, ego_vehicle, scenario_definitions, scenarios_per_tick=5, timeout=300, debug=False):
         """
         Initializes the class of all the scenarios that will be present in the route.
         If a class fails to be initialized, a warning is printed but the route execution isn't stopped
@@ -255,6 +241,15 @@ class RouteScenario(BasicScenario):
         all_scenario_classes = self.get_all_scenario_classes()
         self.list_scenarios = []
         ego_data = ActorConfigurationData(ego_vehicle.type_id, ego_vehicle.get_transform(), 'hero')
+
+        if debug:
+            tmap = CarlaDataProvider.get_map()
+            for scenario_config in scenario_definitions:
+                scenario_loc = scenario_config.trigger_points[0].location
+                debug_loc = tmap.get_waypoint(scenario_loc).transform.location + carla.Location(z=0.2)
+                world.debug.draw_point(debug_loc, size=0.2, color=carla.Color(128, 0, 0), life_time=timeout)
+                world.debug.draw_string(debug_loc, str(scenario_config.name), draw_shadow=False,
+                                        color=carla.Color(0, 0, 128), life_time=timeout, persistent_lines=True)
 
         for scenario_number, scenario_config in enumerate(scenario_definitions):
             scenario_config.ego_vehicles = [ego_data]
