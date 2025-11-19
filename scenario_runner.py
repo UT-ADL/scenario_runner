@@ -639,11 +639,11 @@ def main():
     if arguments.openscenarioparams and not arguments.openscenario:
         print("WARN: Ignoring --openscenarioparams when --openscenario is not specified")
 
-    if arguments.route:
-        arguments.reloadWorld = True
+#    if arguments.route:
+#        arguments.reloadWorld = True
 
-    if arguments.agent:
-        arguments.sync = True
+#    if arguments.agent:
+#        arguments.sync = True
 
     scenario_runner = None
     result = True
