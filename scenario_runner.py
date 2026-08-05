@@ -418,7 +418,8 @@ class ScenarioRunner(object):
                 scenario = RouteScenario(world=self.world,
                                          config=config,
                                          ego_vehicles=self.ego_vehicles,
-                                         debug_mode=self._args.debug)
+                                         debug_mode=self._args.debug,
+                                         additional_scenario=self._args.additionalScenario)
             elif self._args.openscenario2:
                 scenario = OSC2Scenario(world=self.world,
                                         ego_vehicles=self.ego_vehicles,

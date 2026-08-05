@@ -50,6 +50,10 @@ from srunner.tools.route_manipulation import interpolate_trajectory
 
 SECONDS_GIVEN_PER_METERS = 0.4
 
+# The Tartu demo route brings its own traffic, so CARLA's background activity is disabled here.
+# Set to True to restore the upstream behaviour of spawning surrounding vehicles along the route.
+ENABLE_BACKGROUND_ACTIVITY = False
+
 
 class RouteScenario(BasicScenario):
 
@@ -58,12 +62,14 @@ class RouteScenario(BasicScenario):
     along which several smaller scenarios are triggered
     """
 
-    def __init__(self, world, config, ego_vehicles=None, debug_mode=False, criteria_enable=True, timeout=600):
+    def __init__(self, world, config, ego_vehicles=None, debug_mode=False, criteria_enable=True, timeout=600,
+                 additional_scenario=''):
         """
         Setup all relevant parameters and create scenarios along route
         """
 
         self.config = config
+        self._additional_scenario = additional_scenario
         self.route = self._get_route(config)
         sampled_scenario_definitions = self._filter_scenarios(config.scenario_configs)
 
@@ -121,8 +127,10 @@ class RouteScenario(BasicScenario):
         for scenario_config in scenario_configs:
             trigger_point = scenario_config.trigger_points[0]
             if not RouteParser.is_scenario_at_route(trigger_point, self.route):
-                print("WARNING: Ignoring scenario '{}' as it is too far from the route".format(scenario_config.name))
-                continue
+                # The Tartu demo scenarios are triggered by their own conditions rather than by
+                # proximity to the route, so warn instead of dropping them.
+                print("WARNING: Scenario '{}' is far from the route, triggering it anyway".format(
+                    scenario_config.name))
 
             new_scenarios_config.append(scenario_config)
 
@@ -205,6 +213,15 @@ class RouteScenario(BasicScenario):
 
         # Path of all scenario at "srunner/scenarios" folder
         scenarios_list = glob.glob("{}/srunner/scenarios/*.py".format(os.getenv('SCENARIO_RUNNER_ROOT', "./")))
+
+        # ... plus the file given via --additionalScenario, so that routes can trigger scenarios
+        # that live outside this repository (e.g. in the Autoware Mini repo)
+        if self._additional_scenario:
+            additional_scenario = os.path.expanduser(self._additional_scenario)
+            if os.path.exists(additional_scenario):
+                scenarios_list.append(additional_scenario)
+            else:
+                print("WARNING: Ignoring --additionalScenario '{}' as it does not exist".format(additional_scenario))
 
         all_scenario_classes = {}
 
@@ -310,7 +327,8 @@ class RouteScenario(BasicScenario):
         behavior.add_child(scenario_triggerer)  # Tick the ScenarioTriggerer before the scenarios
 
         # Add the Background Activity
-        behavior.add_child(BackgroundBehavior(self.ego_vehicles[0], self.route, name="BackgroundActivity"))
+        if ENABLE_BACKGROUND_ACTIVITY:
+            behavior.add_child(BackgroundBehavior(self.ego_vehicles[0], self.route, name="BackgroundActivity"))
 
         behavior.add_children(scenario_behaviors)
         return behavior
