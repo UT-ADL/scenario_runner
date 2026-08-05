@@ -332,22 +332,26 @@ class ScenarioRunner(object):
 
         if self._args.reloadWorld:
             self.world = self.client.load_world(town)
-        else:
-            # if the world should not be reloaded, wait at least until all ego vehicles are ready
-            ego_vehicle_found = False
-            if self._args.waitForEgo:
-                while not ego_vehicle_found and not self._shutdown_requested:
-                    vehicles = self.client.get_world().get_actors().filter('vehicle.*')
-                    for ego_vehicle in ego_vehicles:
-                        ego_vehicle_found = False
-                        for vehicle in vehicles:
-                            if vehicle.attributes['role_name'] == ego_vehicle.rolename:
-                                ego_vehicle_found = True
-                                break
-                        if not ego_vehicle_found:
-                            print("Not all ego vehicles ready. Waiting ... ")
-                            time.sleep(1)
+
+        # if waitForEgo then wait until all ego vehicles are ready, regardless of whether
+        # the world was reloaded or not
+        ego_vehicle_found = False
+        if self._args.waitForEgo and not ego_vehicles:
+            print("WARNING: --waitForEgo was given but no ego vehicle is declared in the "
+                  "configuration, so there is nothing to wait for.")
+        elif self._args.waitForEgo:
+            while not ego_vehicle_found and not self._shutdown_requested:
+                vehicles = self.client.get_world().get_actors().filter('vehicle.*')
+                for ego_vehicle in ego_vehicles:
+                    ego_vehicle_found = False
+                    for vehicle in vehicles:
+                        if vehicle.attributes['role_name'] == ego_vehicle.rolename:
+                            ego_vehicle_found = True
                             break
+                    if not ego_vehicle_found:
+                        print("Not all ego vehicles ready. Waiting ... ")
+                        time.sleep(1)
+                        break
 
         self.world = self.client.get_world()
 
@@ -413,6 +417,7 @@ class ScenarioRunner(object):
             elif self._args.route:
                 scenario = RouteScenario(world=self.world,
                                          config=config,
+                                         ego_vehicles=self.ego_vehicles,
                                          debug_mode=self._args.debug)
             elif self._args.openscenario2:
                 scenario = OSC2Scenario(world=self.world,

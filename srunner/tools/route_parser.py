@@ -64,6 +64,7 @@ class RouteParser(object):
             route_config.town = route.attrib['town']
             route_config.name = "RouteScenario_{}".format(route_id)
             route_config.weather = RouteParser.parse_weather(route)
+            route_config.ego_vehicles = RouteParser.parse_ego_vehicles(route)
 
             # The list of carla.Location that serve as keypoints on this route
             positions = []
@@ -94,6 +95,17 @@ class RouteParser(object):
             route_configs.append(route_config)
 
         return route_configs
+
+    @staticmethod
+    def parse_ego_vehicles(route):
+        """
+        Returns a list of ego vehicles declared for that route.
+        """
+        ego_vehicles = []
+        for ego_vehicle_elem in route.iter("ego_vehicle"):
+            ego_vehicles.append(ActorConfigurationData.parse_from_node(
+                ego_vehicle_elem, str(ego_vehicle_elem.attrib['rolename'])))
+        return ego_vehicles
 
     @staticmethod
     def parse_weather(route):

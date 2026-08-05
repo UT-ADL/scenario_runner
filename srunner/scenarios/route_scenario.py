@@ -58,7 +58,7 @@ class RouteScenario(BasicScenario):
     along which several smaller scenarios are triggered
     """
 
-    def __init__(self, world, config, debug_mode=False, criteria_enable=True, timeout=300):
+    def __init__(self, world, config, ego_vehicles=None, debug_mode=False, criteria_enable=True, timeout=600):
         """
         Setup all relevant parameters and create scenarios along route
         """
@@ -67,7 +67,11 @@ class RouteScenario(BasicScenario):
         self.route = self._get_route(config)
         sampled_scenario_definitions = self._filter_scenarios(config.scenario_configs)
 
-        ego_vehicle = self._spawn_ego_vehicle()
+        # For a given route, use the first ego vehicle as the one that drives it. With --waitForEgo
+        # the vehicle already exists (spawned by e.g. Autoware Mini) and is only repositioned.
+        ego_vehicle = ego_vehicles[0] if ego_vehicles else None
+        ego_vehicle = self._update_ego_vehicle(ego_vehicle)
+
         self.timeout = self._estimate_route_timeout()
 
         if debug_mode:
@@ -124,14 +128,20 @@ class RouteScenario(BasicScenario):
 
         return new_scenarios_config
 
-    def _spawn_ego_vehicle(self):
-        """Spawn the ego vehicle at the first waypoint of the route"""
+    def _update_ego_vehicle(self, ego_vehicle=None):
+        """
+        Move an existing ego vehicle to the first waypoint of the route, or spawn one there
+        if none was provided (i.e. scenario_runner was started without --waitForEgo).
+        """
         elevate_transform = self.route[0][0]
         elevate_transform.location.z += 0.5
 
-        ego_vehicle = CarlaDataProvider.request_new_actor('vehicle.lincoln.mkz_2017',
-                                                          elevate_transform,
-                                                          rolename='hero')
+        if ego_vehicle:
+            ego_vehicle.set_transform(elevate_transform)
+        else:
+            ego_vehicle = CarlaDataProvider.request_new_actor('vehicle.lincoln.mkz_2017',
+                                                              elevate_transform,
+                                                              rolename='hero')
 
         return ego_vehicle
 
