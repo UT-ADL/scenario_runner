@@ -1799,9 +1799,9 @@ class RunningRedLightTest(Criterion):
         wps = []
         for wpx in ini_wps:
             while not wpx.is_junction:
-                next_wp = wpx.next(0.5)[0]
-                if next_wp and not next_wp.is_junction:
-                    wpx = next_wp
+                next_wps = wpx.next(0.5)
+                if next_wps and not next_wps[0].is_junction:
+                    wpx = next_wps[0]
                 else:
                     break
             wps.append(wpx)
