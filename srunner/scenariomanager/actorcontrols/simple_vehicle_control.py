@@ -213,7 +213,10 @@ class SimpleVehicleControl(BasicControl):
             # When changing from "free" driving without pre-defined waypoints to a defined route with waypoints
             # it may happen that the first few waypoints are too close to the ego vehicle for obtaining a
             # reasonable control command. Therefore, we drop these waypoints first.
-            while self._waypoints and self._waypoints[0].location.distance(self._actor.get_location()) < 0.5:
+            # Measured flat: a point straight above the vehicle (a path that starts at a spawn
+            # point placed above the road) is as unreachable as a near one, and steering at it
+            # divides by an XY distance of zero.
+            while self._waypoints and self._xy_distance(self._waypoints[0].location) < 0.5:
                 self._waypoints = self._waypoints[1:]
 
             self._reached_goal = False
@@ -225,6 +228,13 @@ class SimpleVehicleControl(BasicControl):
                     self._waypoints = self._waypoints[1:]
                     if not self._waypoints:
                         self._reached_goal = True
+
+    def _xy_distance(self, location):
+        """
+        Return the flat (XY) distance from the actor to location
+        """
+        actor_location = self._actor.get_location()
+        return math.hypot(location.x - actor_location.x, location.y - actor_location.y)
 
     def _offset_waypoint(self, transform):
         """
@@ -318,6 +328,13 @@ class SimpleVehicleControl(BasicControl):
         velocity = carla.Vector3D(0, 0, 0)
         direction = next_location - CarlaDataProvider.get_location(self._actor)
         direction_norm = math.sqrt(direction.x**2 + direction.y**2)
+        if direction_norm < 1e-3:
+            # The target is where the vehicle is (CarlaDataProvider's location of this tick can
+            # differ from the live one run_step measured): count it as reached instead of
+            # dividing by zero.
+            self._actor.set_target_velocity(velocity)
+            self._last_update = current_time
+            return direction_norm
         velocity.x = direction.x / direction_norm * target_speed
         velocity.y = direction.y / direction_norm * target_speed
 

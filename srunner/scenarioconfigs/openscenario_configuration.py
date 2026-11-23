@@ -25,6 +25,30 @@ from srunner.scenariomanager.carla_data_provider import CarlaDataProvider  # wor
 from srunner.tools.openscenario_parser import OpenScenarioParser, ParameterRef
 
 
+def road_file_map_name(filepath):
+    """
+    Return the map a road file is named after: its basename without .xodr (Town01.xodr -> Town01)
+    """
+    base = os.path.basename(str(filepath).replace("\\", "/").rstrip("/"))
+    if base.lower().endswith(".xodr"):
+        base = base[:-len(".xodr")]
+    return base
+
+
+def road_file_plays_on(loaded, wanted):
+    """
+    True when a road file named for map 'wanted' belongs to the loaded map 'loaded'.
+
+    The same name, CARLA's renamed variants (Town01 / Town01_Opt, Town10HD / Town10HD_Opt), or one
+    name being the other plus '_<variant>' (tartu_demo and tartu_demo_mesh share roads and frame).
+    """
+    if not loaded or not wanted:
+        return False
+    if loaded == wanted or loaded in (wanted + "_Opt", wanted + "HD", wanted + "HD_Opt"):
+        return True
+    return loaded.startswith(wanted + "_") or wanted.startswith(loaded + "_")
+
+
 class OpenScenarioConfiguration(ScenarioConfiguration):
 
     """
@@ -164,6 +188,13 @@ class OpenScenarioConfiguration(ScenarioConfiguration):
         for logic in self.xml_tree.find("RoadNetwork").findall("LogicFile"):
             self.town = logic.attrib.get('filepath', None)
 
+        # A road file (.xodr) follows OpenSCENARIO 1.0 where ScenarioRunner used to differ;
+        # a CARLA town name keeps ScenarioRunner's own semantics (see OpenScenarioParser).
+        OpenScenarioParser.set_standard_semantics(self.town is not None and ".xodr" in self.town)
+
+        if self._use_loaded_map():
+            return
+
         if self.town is not None and ".xodr" in self.town:
             if not os.path.isabs(self.town):
                 self.town = os.path.dirname(os.path.abspath(self.filename)) + "/" + self.town
@@ -217,6 +248,31 @@ class OpenScenarioConfiguration(ScenarioConfiguration):
                 world.wait_for_tick()
         else:
             CarlaDataProvider.set_world(world)
+
+    def _use_loaded_map(self):
+        """
+        Play on the loaded map when the LogicFile is a road file of it; True when it is.
+
+        A road file named after the loaded map (Town01.xodr on Town01, tartu_demo_mesh.xodr on
+        tartu_demo) is that map's OpenDRIVE: the loaded world is kept, nothing is loaded or
+        generated, and the file itself need not exist. Any other LogicFile is left to the
+        code below (load the town, or generate a world from the road file).
+        """
+        if self.town is None or ".xodr" not in self.town:
+            return False
+        world = self.client.get_world()
+        if world is None:
+            return False
+        loaded = world.get_map().name.split('/')[-1]
+        wanted = road_file_map_name(self.town)
+        if not road_file_plays_on(loaded, wanted):
+            return False
+        if loaded != wanted:
+            print("OpenSCENARIO: road file {} plays on the loaded map {} (same roads)".format(
+                os.path.basename(self.town), loaded))
+        self.town = loaded
+        CarlaDataProvider.set_world(world)
+        return True
 
     def _set_parameters(self):
         """
@@ -354,6 +410,12 @@ class OpenScenarioConfiguration(ScenarioConfiguration):
 
         actor_transform = carla.Transform()
 
+        # The first TeleportAction is the start pose; any later Position in the Init (a route,
+        # a trajectory) is where the actor goes, not where it starts.
+        teleport_transform = self._get_actor_teleport_transform(actor_name)
+        if teleport_transform is not None:
+            return teleport_transform
+
         actor_found = False
 
         for private_action in self.init.iter("Private"):
@@ -376,6 +438,23 @@ class OpenScenarioConfiguration(ScenarioConfiguration):
                 " Warning: The actor '%s' was not assigned an initial position. Using (0,0,0)", actor_name)
             # pylint: enable=line-too-long
         return actor_transform
+
+    def _get_actor_teleport_transform(self, actor_name):
+        """
+        Return the position of the actor's first Init TeleportAction as a transform, else None
+        """
+        for private_action in self.init.iter("Private"):
+            if private_action.attrib.get('entityRef', None) != actor_name:
+                continue
+            for teleport in private_action.iter('TeleportAction'):
+                position = teleport.find('Position')
+                if position is None:
+                    continue
+                transform = OpenScenarioParser.convert_position_to_transform(
+                    position, actor_list=self.other_actors + self.ego_vehicles)
+                if transform:
+                    return transform
+        return None
 
     def _get_actor_speed(self, actor_name):
         """

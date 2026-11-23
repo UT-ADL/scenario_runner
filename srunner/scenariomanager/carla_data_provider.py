@@ -71,6 +71,7 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
     _runtime_init_flag = False
     _lock = threading.Lock()
     _latest_scenario = ""
+    _last_batch_errors = []     # type: list[str] # CARLA's error per command of the last batch ('' = spawned)
 
     @staticmethod
     def set_local_planner(plan):
@@ -698,6 +699,7 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
             CarlaDataProvider._world.wait_for_tick()
 
         actor_ids = [r.actor_id for r in responses if not r.error]
+        CarlaDataProvider._last_batch_errors = [str(r.error) if r.error else '' for r in responses]
         for r in responses:
             if r.error:
                 print("WARNING: Not all actors were spawned")
@@ -831,6 +833,7 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
 
         batch = []
         actors = []
+        batch_actors = []  # (actor config, blueprint id, spawn point) per command in batch
 
         CarlaDataProvider.generate_spawn_points()
 
@@ -880,8 +883,16 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
                 command.then(SetVehicleLightState(FutureActor, carla.VehicleLightState.All))
 
             batch.append(command)
+            batch_actors.append((actor, blueprint.id, _spawn_point))
 
         actors = CarlaDataProvider.handle_actor_batch(batch, tick)
+
+        # Name every actor CARLA refused, with its reason (the batch only says "not all")
+        for (actor, blueprint_id, spawn_point), error in zip(batch_actors, CarlaDataProvider._last_batch_errors):
+            if error:
+                loc = spawn_point.location
+                print("Spawn failed: {} ({}) at ({:.1f}, {:.1f}, {:.1f}): {}".format(
+                    actor.rolename, blueprint_id, loc.x, loc.y, loc.z, error))
 
         if not actors:
             return None

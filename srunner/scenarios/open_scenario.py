@@ -187,6 +187,8 @@ class OpenScenario(BasicScenario):
         self.config_file = config_file
         # Timeout of scenario in seconds
         self.timeout = timeout
+        # Role names of actors CARLA could not spawn (filled by _initialize_actors)
+        self._missing_actors = set()
 
         super(OpenScenario, self).__init__(self.config.name, ego_vehicles=ego_vehicles, config=config,
                                            world=world, debug_mode=debug_mode,
@@ -383,6 +385,8 @@ class OpenScenario(BasicScenario):
                     policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ALL, name="Maneuvers")
 
                 for sequence in act.iter("ManeuverGroup"):
+                    if self._skip_maneuver_group(sequence):
+                        continue
                     sequence_behavior = py_trees.composites.Sequence(name=sequence.attrib.get('name'))
                     repetitions = sequence.attrib.get('maximumExecutionCount', 1)
 
@@ -521,7 +525,62 @@ class OpenScenario(BasicScenario):
 
         behavior.add_child(stories_behavior)
 
+        storyboard_stop = self._create_storyboard_stop_trigger()
+        if storyboard_stop is not None:
+            # The storyboard ends when its stories are done or its StopTrigger fires
+            storyboard = py_trees.composites.Parallel(
+                policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE, name="Storyboard")
+            storyboard.add_child(behavior)
+            storyboard.add_child(storyboard_stop)
+            return storyboard
+
         return behavior
+
+    def _create_storyboard_stop_trigger(self):
+        """
+        Return the Storyboard StopTrigger without its criteria_ conditions, or None.
+
+        Only for a file read with standard_semantics (OpenSCENARIO 1.0: the storyboard stops when
+        its StopTrigger fires, e.g. VSE's EgoArrived, ScenarioTimeout, DurationReached). Files
+        naming a CARLA town keep ScenarioRunner's old reading: only criteria_ conditions count
+        there (as test criteria, see _create_test_criteria).
+        """
+        stop_trigger = self.config.storyboard.find("StopTrigger")
+        if stop_trigger is None or not OpenScenarioParser.standard_semantics:
+            return None
+        condition_groups = py_trees.composites.Parallel(
+            "Storyboard StopTrigger", policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
+        for condition_group in stop_trigger.iter("ConditionGroup"):
+            conditions = [condition for condition in condition_group.iter("Condition")
+                          if not condition.attrib.get('name', '').startswith('criteria_')]
+            if not conditions:
+                continue
+            group = py_trees.composites.Parallel(
+                name="Condition Group", policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ALL)
+            for condition in conditions:
+                atomic = OpenScenarioParser.convert_condition_to_atomic(
+                    condition, self.other_actors + self.ego_vehicles)
+                group.add_child(oneshot_with_check(
+                    variable_name="StoryboardStopTrigger>" + get_xml_path(self.config.storyboard, condition),
+                    behaviour=atomic))
+            condition_groups.add_child(group)
+        return condition_groups if condition_groups.children else None
+
+    def _skip_maneuver_group(self, sequence):
+        """
+        True when every actor the maneuver group names failed to spawn (one line says so).
+
+        Its actions would otherwise run on no actor and crash the scenario on their first tick.
+        A group naming no actor, or at least one spawned actor, is kept.
+        """
+        named = [entity.attrib.get('entityRef', None)
+                 for actors in sequence.iter("Actors") for entity in actors.iter("EntityRef")]
+        missing = [name for name in named if name in self._missing_actors]
+        if not missing or len(missing) < len(named):
+            return False
+        print("Skipping maneuver group {}: {} not spawned".format(
+            sequence.attrib.get('name'), ", ".join(missing)))
+        return True
 
     def _create_weather_behavior(self):
         """
@@ -610,8 +669,15 @@ class OpenScenario(BasicScenario):
                             if actor.rolename == entity_ref:
                                 config.other_actors.remove(actor)
 
-            new_actors = CarlaDataProvider.request_new_actors(config.other_actors)
-            if not new_actors:
-                raise Exception("Error: Unable to add actors")
+            new_actors = CarlaDataProvider.request_new_actors(config.other_actors) or []
             for new_actor in new_actors:
                 self.other_actors.append(new_actor)
+
+            # An actor CARLA refused (its reason is printed by request_new_actors) is left out:
+            # its maneuver groups are skipped in _create_behavior instead of crashing on it.
+            spawned = set(a.attributes.get('role_name') for a in new_actors)
+            self._missing_actors = set(actor.rolename for actor in config.other_actors
+                                       if actor.rolename not in spawned)
+            if self._missing_actors:
+                print("Not spawned, their stories are skipped: {}".format(
+                    ", ".join(sorted(self._missing_actors))))

@@ -73,6 +73,11 @@ class BasicControl(object):
         """
         self._waypoints = waypoints
         self._waypoints_updated = True
+        # A new path is not reached yet. Without this, a second path given after the first one
+        # was completed (e.g. after an idle) reported "reached" in the tick it was handed over,
+        # before run_step cleared the flag, and its ChangeActorWaypoints ended at once.
+        if waypoints:
+            self._reached_goal = False
 
     def update_offset(self, offset, start_time=None):
         """

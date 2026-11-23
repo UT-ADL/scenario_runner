@@ -22,6 +22,7 @@ import py_trees
 import carla
 
 from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
+from srunner.scenariomanager.scenarioatomics import atomic_criteria
 from srunner.scenariomanager.weather_sim import Weather
 from srunner.scenariomanager.scenarioatomics.atomic_behaviors import (TrafficLightStateSetter,
                                                                       ActorTransformSetterToOSCPosition,
@@ -248,25 +249,39 @@ class OpenScenarioParser(object):
         "YELLOW": carla.TrafficLightState.Yellow,
         "RED": carla.TrafficLightState.Red,
         "OFF": carla.TrafficLightState.Off,
+        # Lamp words in red;yellow;green order, as OpenDRIVE/esmini write a signal's state
+        "ON;OFF;OFF": carla.TrafficLightState.Red,
+        "OFF;ON;OFF": carla.TrafficLightState.Yellow,
+        "OFF;OFF;ON": carla.TrafficLightState.Green,
+        "OFF;OFF;OFF": carla.TrafficLightState.Off,
     }
 
     osc_traffic_signal_phase = {}
     osc_traffic_signal_controller = {}
     global_osc_parameters = {}
     use_carla_coordinate_system = False
+    # True for a file whose RoadNetwork is an OpenDRIVE road file (set per file by the
+    # configuration): it is read as OpenSCENARIO 1.0 says where ScenarioRunner used to differ
+    # (a condition's delay counts after the condition holds; TimeReference None = untimed path).
+    # A file naming a CARLA town keeps ScenarioRunner's old reading it was written against.
+    standard_semantics = False
     osc_filepath = None
 
     @staticmethod
     def get_traffic_light_from_osc_name(name):
         """
         Returns a carla.TrafficLight instance that matches the name given
+
+        "id=<n>": CARLA actor id; "pos=x,y": the light within 2 m of (x, y) in CARLA's frame;
+        anything else: the light's OpenDRIVE signal id.
         """
         traffic_light = None
+        lights = CarlaDataProvider.get_all_actors().filter('traffic.traffic_light')
 
         # Given by id
         if name.startswith("id="):
             tl_id = int(name[3:])
-            for carla_tl in CarlaDataProvider.get_all_actors().filter('traffic.traffic_light'):
+            for carla_tl in lights:
                 if carla_tl.id == tl_id:
                     traffic_light = carla_tl
                     break
@@ -274,12 +289,18 @@ class OpenScenarioParser(object):
         elif name.startswith("pos="):
             tl_pos = name[4:]
             pos = tl_pos.split(",")
-            for carla_tl in CCarlaDataProvider.get_all_actors().filter('traffic.traffic_light'):
+            for carla_tl in lights:
                 carla_tl_location = carla_tl.get_transform().location
                 distance = carla_tl_location.distance(carla.Location(float(pos[0]),
                                                                      float(pos[1]),
                                                                      carla_tl_location.z))
                 if distance < 2.0:
+                    traffic_light = carla_tl
+                    break
+        # Given by OpenDRIVE signal id
+        else:
+            for carla_tl in lights:
+                if str(carla_tl.get_opendrive_id()) == str(name).strip():
                     traffic_light = carla_tl
                     break
 
@@ -304,6 +325,14 @@ class OpenScenarioParser(object):
         the scenario does not use CARLA coordinates, but instead right-hand coordinates.
         """
         OpenScenarioParser.use_carla_coordinate_system = True
+
+    @staticmethod
+    def set_standard_semantics(standard):
+        """
+        Read the file as OpenSCENARIO 1.0 says (True) or with ScenarioRunner's old reading (False).
+        See standard_semantics.
+        """
+        OpenScenarioParser.standard_semantics = bool(standard)
 
     @staticmethod
     def set_parameters(xml_tree, additional_parameter_dict=None):
@@ -594,10 +623,16 @@ class OpenScenarioParser(object):
         returns:
            waypoints: List of trajectory waypoints and times.
                       Only polylines are supported
+           times: the vertex times, or None when the path is untimed: a TimeReference without
+                  Timing (<None/>) in a file read with standard_semantics. Then the actor's
+                  speed comes from its SpeedActions, as OpenSCENARIO 1.0 says.
         """
         trajectory = None
         waypoints = []
         times = []
+        time_reference = xml_tree.find('TimeReference')
+        untimed = (OpenScenarioParser.standard_semantics and time_reference is not None
+                   and time_reference.find('Timing') is None)
 
         if xml_tree.find('Trajectory') is not None:
             trajectory = xml_tree.find('Trajectory')
@@ -612,7 +647,8 @@ class OpenScenarioParser(object):
             if shape.find('Polyline') is not None:
                 line = shape.find('Polyline')
                 for vertex in line.iter('Vertex'):
-                    times.append(float(vertex.get('time')))
+                    if not untimed:
+                        times.append(float(vertex.get('time')))
                     waypoints.append(vertex.find('Position'))
             elif shape.find('Clothoid') is not None:
                 raise AttributeError("Clothoid shapes are currently unsupported")
@@ -623,6 +659,8 @@ class OpenScenarioParser(object):
         else:
             raise AttributeError("No waypoints has been set")
 
+        if untimed:
+            times = None
         return waypoints, times
 
     @staticmethod
@@ -1104,6 +1142,9 @@ class OpenScenarioParser(object):
                     class_name = condition_name[9:]
                     if class_name in globals():
                         criterion_instance = globals()[class_name]
+                    elif isinstance(getattr(atomic_criteria, class_name, None), type) and issubclass(
+                            getattr(atomic_criteria, class_name), atomic_criteria.Criterion):
+                        criterion_instance = getattr(atomic_criteria, class_name)
                     else:
                         raise AttributeError(
                             "The condition {} cannot be mapped to a criterion atomic".format(class_name))
@@ -1180,8 +1221,14 @@ class OpenScenarioParser(object):
 
         if delay_atomic is not None and atomic is not None:
             new_atomic = py_trees.composites.Sequence("delayed sequence")
-            new_atomic.add_child(delay_atomic)
-            new_atomic.add_child(atomic)
+            if OpenScenarioParser.standard_semantics:
+                # OpenSCENARIO 1.0: the delay is the time after the condition is met
+                new_atomic.add_child(atomic)
+                new_atomic.add_child(delay_atomic)
+            else:
+                # ScenarioRunner's old reading: wait the delay, then check the condition
+                new_atomic.add_child(delay_atomic)
+                new_atomic.add_child(atomic)
         else:
             new_atomic = atomic
 
