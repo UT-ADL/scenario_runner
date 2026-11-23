@@ -29,6 +29,7 @@ class GameTime(object):
     _current_game_time = 0.0  # Elapsed game time after starting this Timer
     _carla_time = 0.0
     _last_frame = 0
+    _last_step = 0.0  # Game time the last tick added (one world tick, more if frames were missed)
     _platform_timestamp = 0
     _init = False
 
@@ -41,6 +42,7 @@ class GameTime(object):
         if GameTime._last_frame < timestamp.frame:
             frames = timestamp.frame - GameTime._last_frame if GameTime._init else 1
             GameTime._current_game_time += timestamp.delta_seconds * frames
+            GameTime._last_step = timestamp.delta_seconds * frames
             GameTime._last_frame = timestamp.frame
             GameTime._platform_timestamp = datetime.datetime.now()
             GameTime._init = True
@@ -54,6 +56,7 @@ class GameTime(object):
         GameTime._current_game_time = 0.0
         GameTime._carla_time = 0.0
         GameTime._last_frame = 0
+        GameTime._last_step = 0.0
         GameTime._init = False
 
     @staticmethod
@@ -62,6 +65,13 @@ class GameTime(object):
         Returns elapsed game time
         """
         return GameTime._current_game_time
+
+    @staticmethod
+    def get_last_step():
+        """
+        Returns the game time the last tick added (0 before the first tick)
+        """
+        return GameTime._last_step
 
     @staticmethod
     def get_carla_time():

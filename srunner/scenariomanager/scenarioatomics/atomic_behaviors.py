@@ -875,6 +875,12 @@ class ChangeActorWaypoints(AtomicBehavior):
             if current_waypoint_idx >= len(self._times):
                 return py_trees.common.Status.SUCCESS
             remaining_time = self._times[current_waypoint_idx] - current_relative_time
+            # A vertex due within half a tick is the one for now (rows on the tick grid land a
+            # rounding error before it): aiming at it stopped the car for a tick and then asked for
+            # twice its speed. Aim at the next vertex instead.
+            if remaining_time < GameTime.get_last_step() / 2 and current_waypoint_idx + 1 < len(self._times):
+                current_waypoint_idx += 1
+                remaining_time = self._times[current_waypoint_idx] - current_relative_time
             self._update_speed(actor, self._waypoints[current_waypoint_idx], remaining_time)
 
         return py_trees.common.Status.RUNNING
@@ -883,7 +889,11 @@ class ChangeActorWaypoints(AtomicBehavior):
         target_location = sr_tools.openscenario_parser.OpenScenarioParser.convert_position_to_transform(
             target_waypoint[0]).location
         remaining_dist = calculate_distance(CarlaDataProvider.get_location(self._actor), target_location)
-        target_speed = remaining_dist / max(remaining_time, 0.001)
+        # A tick landing just before a vertex time (rows on the tick grid do so through float
+        # rounding) asked for the distance / ~0 s: a speed spike that threw the car off its path,
+        # and every later row threw it further. The speed holds until the next tick, so the car
+        # is never asked to cover its distance in less than one tick.
+        target_speed = remaining_dist / max(remaining_time, GameTime.get_last_step(), 0.001)
         actor.update_target_speed(target_speed)
 
 
