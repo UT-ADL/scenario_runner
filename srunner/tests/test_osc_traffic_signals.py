@@ -13,13 +13,14 @@ Pinned contracts:
   0.5 m and heading within 30 deg, nearest first; none raises with the nearest distance; without
   the parameter the old lookup (OpenDRIVE id, id=, pos=) is used; a town file ignores it;
 - lowercase lamp words (on;off;off ...) and GREEN/RED/YELLOW/OFF give the CARLA states;
-- a standard file holds: is_frozen() is read once before the first change, then each light is
-  frozen before set_state; a gone light fails the step and is printed; a town file keeps the
-  plain set_state;
-- release: setting vse_signal_<name>_release ends that approach; the lights are released only once
-  no approach is held (freeze is map-wide): freeze(False) unless the map was frozen before the run,
-  then one reset_group per touched group; the scenario's end (OpenScenario.terminate,
-  CarlaDataProvider.cleanup) releases whatever is still held, once, and never raises.
+- a standard file holds per light GROUP, never map-wide: is_frozen() is read once before the first
+  change (never freeze()); the first hold of a group saves every member's green/yellow/red time and
+  sets them to HOLD_PHASE_S, then the light gets its state; a gone light fails the step and is
+  printed; a town file keeps the plain set_state;
+- release: setting vse_signal_<name>_release ends that approach; each of its groups gets its own
+  times back and one reset_group, unless another held approach shares the group; the scenario's
+  end (OpenScenario.terminate, CarlaDataProvider.cleanup) releases whatever is still held, once,
+  and never raises (one line when the server is gone).
 """
 
 import xml.etree.ElementTree as ET
@@ -54,6 +55,7 @@ class _FakeLight(object):
         self.is_alive = True
         self.state = None
         self.group = [self]
+        self.times = [10.0, 3.0, 2.0]   # CARLA's Tartu defaults (green, yellow, red)
         self._opendrive_id = opendrive_id
         self._transform = carla.Transform(carla.Location(x=x, y=y, z=0.0), carla.Rotation(yaw=yaw))
         self.trigger_volume = carla.BoundingBox(carla.Location(*box), carla.Vector3D(1.0, 1.0, 1.0))
@@ -80,6 +82,27 @@ class _FakeLight(object):
     def get_group_traffic_lights(self):
         return self.group
 
+    def get_green_time(self):
+        return self.times[0]
+
+    def get_yellow_time(self):
+        return self.times[1]
+
+    def get_red_time(self):
+        return self.times[2]
+
+    def set_green_time(self, value):
+        self._map.calls.append(("times", self.id, "green", value))
+        self.times[0] = value
+
+    def set_yellow_time(self, value):
+        self._map.calls.append(("times", self.id, "yellow", value))
+        self.times[1] = value
+
+    def set_red_time(self, value):
+        self._map.calls.append(("times", self.id, "red", value))
+        self.times[2] = value
+
     def reset_group(self):
         self._map.calls.append(("reset_group", self.id))
 
@@ -102,7 +125,7 @@ def _clean_state():
     OpenScenarioParser.standard_semantics, OpenScenarioParser.global_osc_parameters = saved
     OpenScenarioParser._light_identities = None
     CarlaDataProvider._held_lights = {}
-    CarlaDataProvider._touched_lights = []
+    CarlaDataProvider._held_groups = {}
     CarlaDataProvider._lights_frozen_before = None
 
 
@@ -250,25 +273,30 @@ def test_lamp_words_in_an_action(lights, word, state):
     assert atomic._state == state
 
 
+HOLD = CarlaDataProvider.HOLD_PHASE_S
+
+
 def test_action_holds_every_light_of_the_approach(lights, world):
     _standard_file({"1123": "100.25 52 0 90"})
     atomic = _convert(_state_action("1123", "off;off;on"))
     assert _ids(atomic._lights) == [11, 10]
     assert atomic.update() == py_trees.common.Status.SUCCESS
     assert lights[0].state == GREEN and lights[1].state == GREEN and lights[2].state is None
-    assert world.frozen
+    assert not world.frozen and not [call for call in world.calls if call[0] == "freeze"]
+    assert lights[0].times == lights[1].times == [HOLD] * 3 and lights[2].times == [10.0, 3.0, 2.0]
 
 
-def test_hold_reads_is_frozen_once_then_freezes_before_each_set(lights, world):
+def test_hold_reads_is_frozen_once_then_holds_the_whole_group_before_the_state(lights, world):
+    _group(lights[1], lights[2])          # 11 shares a group with 20 (another approach)
     _standard_file({"1123": "100.25 52 0 90"})
     atomic = _convert(_state_action("1123", "on;off;off"))  # is_frozen is read while the tree is built
     atomic.update()
     _convert(_state_action("1123", "off;off;on")).update()
-    assert world.calls == [
-        ("is_frozen", 11),
-        ("freeze", 11, True), ("set_state", 11, RED), ("freeze", 10, True), ("set_state", 10, RED),
-        ("freeze", 11, True), ("set_state", 11, GREEN), ("freeze", 10, True), ("set_state", 10, GREEN),
-    ]
+    group_11 = [("times", lid, kind, HOLD) for lid in (11, 20) for kind in ("green", "yellow", "red")]
+    group_10 = [("times", 10, kind, HOLD) for kind in ("green", "yellow", "red")]
+    assert world.calls == [("is_frozen", 11)] + group_11 + [("set_state", 11, RED)] + group_10 + [
+        ("set_state", 10, RED), ("set_state", 11, GREEN), ("set_state", 10, GREEN)]
+    assert lights[2].times == [HOLD] * 3 and lights[2].state is None   # held, not set
 
 
 def test_hold_on_a_gone_light_fails_and_sets_the_others(lights, world, capsys):
@@ -291,7 +319,7 @@ def test_town_file_action_keeps_the_plain_setter(lights, world):
     atomic = _convert(_state_action("302", "GREEN"))
     assert isinstance(atomic, TrafficLightStateSetter)
     atomic.update()
-    assert world.calls == [("set_state", 11, GREEN)]  # no freeze, no is_frozen
+    assert world.calls == [("set_state", 11, GREEN)]  # no hold, no is_frozen
 
 
 def test_release_parameter_builds_a_release_in_a_standard_file_only(lights):
@@ -309,9 +337,8 @@ def _hold(signal, found, state=RED):
     return CarlaDataProvider.hold_traffic_lights(signal, found, state)
 
 
-def _released(world):
-    """The release calls: freeze(False) and reset_group."""
-    return [call for call in world.calls if call[0] == "reset_group" or call == ("freeze", call[1], False)]
+def _resets(world):
+    return [call for call in world.calls if call[0] == "reset_group"]
 
 
 def test_release_parameter_sets_the_parameter_and_releases(lights, world):
@@ -319,51 +346,58 @@ def test_release_parameter_sets_the_parameter_and_releases(lights, world):
     _hold("1123", lights[:2])
     assert _convert(_parameter_action("vse_signal_1123_release")).update() == py_trees.common.Status.SUCCESS
     assert float(CarlaDataProvider.get_osc_global_param_value("vse_signal_1123_release")) == 1.0
-    assert not world.frozen
+    assert lights[0].times == lights[1].times == [10.0, 3.0, 2.0]
+    assert _resets(world) == [("reset_group", 10), ("reset_group", 11)]
 
 
-def test_release_of_one_of_two_held_approaches_waits(lights, world, capsys):
+def test_release_of_one_approach_frees_its_groups_at_once(lights, world):
     _hold("A", lights[:2])
     _hold("B", lights[2:])
     CarlaDataProvider.release_traffic_light_approach("A")
-    assert _released(world) == []
-    assert world.frozen
-    assert "released when signal(s) B are done" in capsys.readouterr().out
+    assert _resets(world) == [("reset_group", 10), ("reset_group", 11)]   # B's group stays held
+    assert lights[0].times == [10.0, 3.0, 2.0] and lights[2].times == [HOLD] * 3
 
 
-def test_release_of_the_last_approach_unfreezes_and_resets_each_group_once(lights, world):
-    _group(lights[0], lights[1])
-    _hold("A", lights[:2])
+def test_a_group_shared_by_two_approaches_waits_for_both(lights, world, capsys):
+    _group(lights[1], lights[2])
+    _hold("A", lights[1:2])
     _hold("B", lights[2:])
     CarlaDataProvider.release_traffic_light_approach("A")
+    assert _resets(world) == [] and lights[1].times == [HOLD] * 3
+    assert "stay held for signal(s) B" in capsys.readouterr().out
     CarlaDataProvider.release_traffic_light_approach("B")
-    assert not world.frozen
-    resets = [call for call in world.calls if call[0] == "reset_group"]
-    assert resets == [("reset_group", 10), ("reset_group", 20)]
-    last_unfreeze = max(i for i, call in enumerate(world.calls) if call == ("freeze", call[1], False))
-    first_reset = min(i for i, call in enumerate(world.calls) if call[0] == "reset_group")
-    assert last_unfreeze < first_reset
+    assert _resets(world) == [("reset_group", 11)]
+    assert lights[1].times == lights[2].times == [10.0, 3.0, 2.0]
 
 
-def test_release_keeps_a_map_frozen_before_the_run(lights, world, capsys):
+def test_release_restores_the_times_before_the_reset(lights, world):
+    _group(lights[0], lights[1])
+    lights[1].times = [20.0, 4.0, 1.0]
+    _hold("A", lights[:2])
+    CarlaDataProvider.release_traffic_light_approach("A")
+    assert lights[0].times == [10.0, 3.0, 2.0] and lights[1].times == [20.0, 4.0, 1.0]
+    last_time = max(i for i, call in enumerate(world.calls) if call[0] == "times")
+    assert world.calls.index(("reset_group", 10)) > last_time
+    assert _resets(world) == [("reset_group", 10)]   # one per group
+
+
+def test_a_map_frozen_before_the_run_is_reported_and_never_unfrozen(lights, world, capsys):
     world.frozen = True
     _hold("A", lights[:2])
     assert "already frozen at start" in capsys.readouterr().out
     CarlaDataProvider.release_traffic_light_approach("A")
-    assert world.frozen
-    assert ("freeze", 10, False) not in world.calls and ("freeze", 11, False) not in world.calls
-    assert [call for call in world.calls if call[0] == "reset_group"] == [("reset_group", 10), ("reset_group", 11)]
+    assert world.frozen and not [call for call in world.calls if call[0] == "freeze"]
 
 
 def test_approach_held_again_after_a_release_is_released_again(lights, world):
     _hold("A", lights[:1])
     CarlaDataProvider.release_traffic_light_approach("A")
     _hold("A", lights[:1], GREEN)
-    assert world.frozen
+    assert lights[0].times == [HOLD] * 3
     CarlaDataProvider.release_traffic_light_approach("A")
-    assert not world.frozen
+    assert lights[0].times == [10.0, 3.0, 2.0]
     assert [call for call in world.calls if call[0] == "is_frozen"] == [("is_frozen", 10)]
-    assert [call for call in world.calls if call[0] == "reset_group"] == [("reset_group", 10)] * 2
+    assert _resets(world) == [("reset_group", 10)] * 2
 
 
 def _scenario():
@@ -377,9 +411,8 @@ def test_scenario_end_releases_approaches_still_held(lights, world):
     _hold("B", lights[2:])
     CarlaDataProvider.release_traffic_light_approach("A")
     _scenario().terminate()
-    assert not world.frozen
-    assert [call for call in world.calls if call[0] == "reset_group"] == [
-        ("reset_group", 10), ("reset_group", 11), ("reset_group", 20)]
+    assert _resets(world) == [("reset_group", 10), ("reset_group", 11), ("reset_group", 20)]
+    assert all(light.times == [10.0, 3.0, 2.0] for light in lights)
     assert CarlaDataProvider._lights_frozen_before is None  # the next run reads it again
 
 
@@ -401,33 +434,26 @@ def test_scenario_end_releases_once(lights, world, provider_state):
     scenario.terminate()
     scenario.terminate()
     CarlaDataProvider.cleanup()
-    assert [call for call in world.calls if call[0] == "reset_group"] == [("reset_group", 10)]
-
-
-def test_scenario_end_keeps_a_map_frozen_before_the_run(lights, world):
-    world.frozen = True
-    _hold("A", lights[:1])
-    _scenario().terminate()
-    assert world.frozen
-    assert ("freeze", 10, False) not in world.calls
+    assert _resets(world) == [("reset_group", 10)]
 
 
 def test_data_provider_cleanup_releases_held_lights(lights, world, provider_state):
     _hold("A", lights[:2])
     CarlaDataProvider.cleanup()
-    assert not world.frozen
-    assert len([call for call in world.calls if call[0] == "reset_group"]) == 2
+    assert len(_resets(world)) == 2 and lights[0].times == [10.0, 3.0, 2.0]
 
 
-def test_release_on_a_gone_server_prints_and_does_not_raise(lights, world, capsys):
+def test_release_on_a_gone_server_prints_once_and_does_not_raise(lights, world, capsys):
     _hold("A", lights[:1])
+    _hold("B", lights[2:])
 
-    def _timeout(freeze):
+    def _timeout(value):
         raise RuntimeError("time-out of 10000ms while waiting for the simulator")
-    lights[0].freeze = _timeout
+    lights[0].set_green_time = _timeout
     _scenario().terminate()
-    assert "release failed (time-out" in capsys.readouterr().out
-    assert CarlaDataProvider._touched_lights == []
+    out = capsys.readouterr().out
+    assert out.count("release failed (time-out") == 1
+    assert CarlaDataProvider._held_groups == {}
 
 
 def test_release_skips_gone_lights(lights, world):

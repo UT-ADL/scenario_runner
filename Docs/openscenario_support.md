@@ -75,18 +75,23 @@ state holds until the file changes it:
   name is looked up as before (`id=`, `pos=`, OpenDRIVE signal id). The name is never decoded.
 - *States.* `red`, `yellow`, `green`, `off` in any case, or lamp words red;yellow;green
   (`on;off;off`, `off;on;off`, `off;off;on`, `off;off;off`, esmini's form).
-- *Hold.* Before the run's first light change the map's `is_frozen()` is read (frozen already: one
-  line says a previous run was probably killed). Each step freezes, then sets each light, as VSE
-  Play does. CARLA's `freeze()` is map-wide (`FreezeAllTrafficLights`): while a light is held,
-  every light of the map stops cycling. Phase times are not touched (they cannot hold a state).
+- *Hold, per light group.* Each step sets every light of the approach to its state and holds it
+  by its CARLA light group: every light of that group gets a very long green/yellow/red time (its
+  own times are kept), so the group never moves on to its next phase and nothing overwrites the
+  state; every other group of the map keeps cycling. `freeze()` is never used: in CARLA's Python
+  API it freezes every light of the map (`FreezeAllTrafficLights`), which in a long scenario stops
+  the whole city (VSE's Tartu lap deadlocked on a red that was never switched), and a light's own
+  phase times alone cannot hold a state (the group turns its next phase's lights green). The map's
+  `is_frozen()` is read once before the first change: frozen already means a previous run was
+  probably killed (one line says so); it stays frozen.
 - *Release.* A `ParameterAction` that sets `vse_signal_<name>_release` (VSE writes it after the
-  last step's duration) ends that approach's sequence. Once no approach is held any more (release
-  waits while another sequence runs, since unfreezing is map-wide): `freeze(False)`, unless the map
-  was frozen before the run, then one `reset_group()` per group touched. The end of the scenario
-  releases whatever is still held, on every exit ScenarioRunner handles (normal end, Storyboard
-  stop, failure, Ctrl+C / SIGTERM, the watchdog, an exception). A `kill -9` leaves the map frozen.
+  last step's duration) ends that approach's sequence: each of its groups gets its own phase times
+  back and one `reset_group()` (restarting its cycle), unless another held approach still uses the
+  group. The end of the scenario releases whatever is still held, on every exit ScenarioRunner
+  handles (normal end, Storyboard stop, failure, Ctrl+C / SIGTERM, the watchdog, an exception). A
+  `kill -9` leaves the held groups on their long times until the map is reloaded.
 
-A file naming a CARLA town keeps the plain `set_state` (no freeze, no release) and ignores these
+A file naming a CARLA town keeps the plain `set_state` (no hold, no release) and ignores these
 parameters.
 
 ### Migrating OpenSCENARIO 0.9.x to 1.0

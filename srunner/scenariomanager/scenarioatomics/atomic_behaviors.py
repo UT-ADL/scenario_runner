@@ -232,8 +232,9 @@ class TrafficLightRelease(ChangeParameter):
     Set a vse_signal_<id>_release parameter and end that signal's light sequence (standard files)
 
     VSE's export sets it after the last step of a signal's sequence. The parameter is set as by
-    ChangeParameter; then the approach no longer counts as held, and the map's lights are released
-    once no approach is held (CarlaDataProvider.release_traffic_light_approach).
+    ChangeParameter; then the approach no longer counts as held, and each of its light groups goes
+    back to its own cycle unless another held approach still uses it
+    (CarlaDataProvider.release_traffic_light_approach).
 
     Args:
         signal (str): the signal name (TrafficSignalStateAction name) whose sequence is over
@@ -3249,8 +3250,8 @@ class TrafficLightHold(AtomicBehavior):
     """
     Set every light of one approach to a state that holds (standard OpenSCENARIO files)
 
-    The map's lights are frozen first (freeze is map-wide in CARLA's Python API), then each light
-    gets the state, as VSE Play does (CarlaDataProvider.hold_traffic_lights). The lights stay held
+    Held per light group (CarlaDataProvider.hold_traffic_lights: long phase times on the light's
+    group, never the map-wide freeze), then each light gets the state. The lights stay held
     after this behavior succeeds, until the signal's release parameter is set (TrafficLightRelease)
     or the scenario ends (OpenScenario.terminate / CarlaDataProvider.cleanup).
 
@@ -3270,7 +3271,7 @@ class TrafficLightHold(AtomicBehavior):
 
     def update(self):
         """
-        Freeze, then set the state of every light of the approach
+        Hold the groups, then set the state of every light of the approach
         """
         dead = CarlaDataProvider.hold_traffic_lights(self._signal, self._lights, self._state)
         if dead:

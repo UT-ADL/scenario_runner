@@ -56,8 +56,9 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
     _global_osc_parameters = {} # type: dict[str, Any] # type: ignore : suppresses the missing Any import
     # Lights a standard OpenSCENARIO file holds (see hold_traffic_lights)
     _held_lights = {}             # type: dict[str, list] # signal name -> the approach's held lights
-    _touched_lights = []          # type: list # lights set since the last release (for reset_group)
+    _held_groups = {}             # type: dict # frozenset(group light ids) -> {lights, times, signals}
     _lights_frozen_before = None  # map's is_frozen() before this run's first light change; None = not read
+    HOLD_PHASE_S = 1.0e6          # s; phase time of a held group: it never reaches its next phase
     _client = None              # type: carla.Client
     _world = None               # type: carla.World
     _map = None                 # type: carla.Map
@@ -149,42 +150,64 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         """
         Set every light of one approach to state and hold it there; return the lights that are gone
 
-        As VSE Play does: freeze first (map-wide in CARLA's Python API, FreezeAllTrafficLights:
-        every light of the map stops cycling), then set_state, light by light. Phase times are
-        not touched (they cannot hold a state). The lights stay held until release_traffic_light_approach
-        or release_all_traffic_lights.
+        Held per light GROUP, never map-wide: CARLA's Python freeze() freezes every light of the map
+        (FreezeAllTrafficLights -- 11-23 that locked up a whole Tartu lap), and a light's own phase
+        times cannot hold a state (a group times only its current phase and, when that ends, turns
+        the next phase's lights green). So every light of the held light's group gets HOLD_PHASE_S as
+        green/yellow/red time (its own times are kept for the release): that group never moves on,
+        nothing overwrites the state set here, and every other group keeps cycling. The lights stay
+        held until release_traffic_light_approach or release_all_traffic_lights. freeze() is never
+        called (a map frozen before the run stays frozen).
         """
         alive, dead = [], []
         for light in lights:
             (alive if light.is_alive else dead).append(light)
         if alive:
             CarlaDataProvider.record_lights_frozen_before(alive[0])
-        touched_ids = set(light.id for light in CarlaDataProvider._touched_lights)
         for light in alive:
-            if light.id not in touched_ids:
-                CarlaDataProvider._touched_lights.append(light)
-                touched_ids.add(light.id)
-            light.freeze(True)
-            light.set_state(state)
+            try:
+                group = list(light.get_group_traffic_lights()) or [light]
+                key = frozenset(member.id for member in group)
+                entry = CarlaDataProvider._held_groups.get(key)
+                if entry is None:
+                    times = dict((member.id, (member.get_green_time(), member.get_yellow_time(),
+                                              member.get_red_time())) for member in group)
+                    for member in group:
+                        member.set_green_time(CarlaDataProvider.HOLD_PHASE_S)
+                        member.set_yellow_time(CarlaDataProvider.HOLD_PHASE_S)
+                        member.set_red_time(CarlaDataProvider.HOLD_PHASE_S)
+                    entry = {'lights': group, 'times': times, 'signals': set()}
+                    CarlaDataProvider._held_groups[key] = entry
+                entry['signals'].add(signal)
+                light.set_state(state)
+            except RuntimeError as e:
+                print("Traffic signal {}: light {} could not be held ({})".format(signal, light.id, e))
+                dead.append(light)
         if alive:
-            CarlaDataProvider._held_lights[signal] = alive
+            CarlaDataProvider._held_lights[signal] = [light for light in alive if light not in dead]
         return dead
 
     @staticmethod
     def release_traffic_light_approach(signal):
         """
-        The light sequence of one approach is over: release the lights once no approach is held
+        The light sequence of one approach is over: give its groups back to CARLA's own cycle
 
-        freeze(False) is map-wide, so while another approach is still held its release waits
-        (VSE Play does the same).
+        A group another held approach still uses stays held until that one is over too.
         """
         CarlaDataProvider._held_lights.pop(signal, None)
-        if CarlaDataProvider._held_lights:
-            if CarlaDataProvider._touched_lights:
-                print("Traffic signal {} done; lights released when signal(s) {} are done too (freeze is map-wide)"
-                      .format(signal, ", ".join(sorted(CarlaDataProvider._held_lights))))
-            return
-        CarlaDataProvider._release_touched_lights()
+        done, waiting = [], []
+        for key, entry in CarlaDataProvider._held_groups.items():
+            if signal not in entry['signals']:
+                continue
+            entry['signals'].discard(signal)
+            (waiting if entry['signals'] else done).append(key)
+        if waiting:
+            others = set()
+            for key in waiting:
+                others |= CarlaDataProvider._held_groups[key]['signals']
+            print("Traffic signal {} done; {} group(s) stay held for signal(s) {}".format(
+                signal, len(waiting), ", ".join(sorted(others))))
+        CarlaDataProvider._release_groups(done)
 
     @staticmethod
     def release_all_traffic_lights():
@@ -192,39 +215,34 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         Release every light the scenario holds (its end, on every exit path); safe to call again
         """
         CarlaDataProvider._held_lights.clear()
-        CarlaDataProvider._release_touched_lights()
+        CarlaDataProvider._release_groups(list(CarlaDataProvider._held_groups))
         CarlaDataProvider._lights_frozen_before = None
 
     @staticmethod
-    def _release_touched_lights():
+    def _release_groups(keys):
         """
-        freeze(False) unless the map was frozen before the run, then one reset_group per touched group
+        Give each held group its own phase times back, then one reset_group (it restarts its cycle)
         """
-        lights = CarlaDataProvider._touched_lights
-        CarlaDataProvider._touched_lights = []
-        if not lights:
+        if not keys:
             return
+        entries = [CarlaDataProvider._held_groups.pop(key) for key in keys]
+        released = 0
         try:
-            lights = [light for light in lights if light.is_alive]
-            if not lights:
-                return
-            if not CarlaDataProvider._lights_frozen_before:
-                for light in lights:
-                    light.freeze(False)
-            groups = set()
-            for light in lights:
-                group = frozenset(member.id for member in light.get_group_traffic_lights())
-                if group in groups:
-                    continue
-                groups.add(group)
-                light.reset_group()
+            for entry in entries:
+                members = [member for member in entry['lights'] if member.is_alive]
+                for member in members:
+                    green, yellow, red = entry['times'][member.id]
+                    member.set_green_time(green)
+                    member.set_yellow_time(yellow)
+                    member.set_red_time(red)
+                if members:
+                    members[0].reset_group()
+                    released += 1
         except RuntimeError as e:
-            # The server is gone or does not answer: nothing left to release on it
+            # The server is gone or does not answer: nothing left to release on it (no retry per group)
             print("Traffic lights: release failed ({})".format(e))
             return
-        print("Traffic lights released ({} light(s), {} group(s){})".format(
-            len(lights), len(groups), ", map stays frozen as before the run" if CarlaDataProvider._lights_frozen_before
-            else ""))
+        print("Traffic lights released ({} group(s) back to their own cycle)".format(released))
 
     @staticmethod
     def register_actors(actors, transforms=None):
