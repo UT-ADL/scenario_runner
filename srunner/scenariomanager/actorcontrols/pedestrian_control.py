@@ -63,10 +63,21 @@ class PedestrianControl(BasicControl):
 
         if self._waypoints:
             self._reached_goal = False
+            # A point within 0.5 m in XY is where the walker is (a path's first point is often its
+            # spawn): the direction to it is undefined, and 0 / 0 gave a NaN direction.
+            while self._waypoints and self._xy_distance(self._waypoints[0].location) < 0.5:
+                self._waypoints = self._waypoints[1:]
+            if not self._waypoints:
+                self._reached_goal = True
+
+        if self._waypoints:
             location = self._waypoints[0].location
             direction = location - self._actor.get_location()
             direction_norm = math.sqrt(direction.x**2 + direction.y**2)
-            control.direction = direction / direction_norm
+            # Walkers move in the ground plane (UE drops a walking pawn's vertical input), so the
+            # direction is the flat unit vector; the old 3D difference over the flat norm was not
+            # a unit vector whenever the point was higher or lower than the walker.
+            control.direction = carla.Vector3D(direction.x / direction_norm, direction.y / direction_norm, 0.0)
             self._actor.apply_control(control)
             if direction_norm < 1.0:
                 self._waypoints = self._waypoints[1:]
@@ -75,3 +86,10 @@ class PedestrianControl(BasicControl):
         else:
             control.direction = self._actor.get_transform().rotation.get_forward_vector()
             self._actor.apply_control(control)
+
+    def _xy_distance(self, location):
+        """
+        Return the flat (XY) distance from the walker to location
+        """
+        actor_location = self._actor.get_location()
+        return math.hypot(location.x - actor_location.x, location.y - actor_location.y)
