@@ -40,7 +40,8 @@ from srunner.scenariomanager.scenarioatomics.atomic_behaviors import (TrafficLig
                                                                       Idle,
                                                                       ChangeParameter, ChangeLateralDistance,
                                                                       ActorDestroy, AddActor,
-                                                                      TrafficLightControllerSetter)
+                                                                      TrafficLightControllerSetter,
+                                                                      TrafficLightHold, TrafficLightRelease)
 # pylint: disable=unused-import
 # For the following includes the pylint check is disabled, as these are accessed via globals()
 from srunner.scenariomanager.scenarioatomics.atomic_criteria import (CollisionTest,
@@ -267,14 +268,108 @@ class OpenScenarioParser(object):
     standard_semantics = False
     osc_filepath = None
 
+    # A standard file may declare a signal's approach as vse_signal_<name> = "x y z yaw" (VSE's
+    # export: CARLA-frame trigger-box centre and heading). Every light whose trigger box lies this
+    # close is driven with it, the rule of VSE's light identity (vse_common/traffic_lights.py).
+    VSE_SIGNAL_MATCH_M = 0.5      # m, 3D between trigger-box centres
+    VSE_SIGNAL_MATCH_DEG = 30.0   # deg, between headings (light yaw + trigger-box yaw)
+    _light_identities = None      # [(light, centre, heading)] of the map, swept once per file
+
+    @staticmethod
+    def vse_signal_position(name):
+        """
+        Return the (carla.Location, yaw) a standard file declares for signal name, or None
+
+        Only a file read with standard_semantics: a file naming a CARLA town never resolves by it.
+        """
+        if not OpenScenarioParser.standard_semantics or name is None:
+            return None
+        value = OpenScenarioParser.global_osc_parameters.get("vse_signal_" + str(name).strip())
+        if value is None:
+            return None
+        try:
+            x, y, z, yaw = [float(v) for v in str(value).split()]
+        except ValueError as exc:
+            raise ValueError("OpenSCENARIO: parameter vse_signal_{} must be 'x y z yaw' (CARLA frame), got '{}'"
+                             .format(str(name).strip(), value)) from exc
+        return carla.Location(x=x, y=y, z=z), yaw
+
+    @staticmethod
+    def vse_signal_release(parameter_ref):
+        """
+        Return the signal name a vse_signal_<name>_release parameter ends in a standard file, or None
+        """
+        if not OpenScenarioParser.standard_semantics or parameter_ref is None:
+            return None
+        match = re.match(r"^\$?vse_signal_(.+)_release$", parameter_ref.strip())
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _traffic_light_identities():
+        """
+        Return [(light, trigger-box centre, heading)] for every light of the map (once per file)
+        """
+        identities = OpenScenarioParser._light_identities
+        if identities is None:
+            identities = []
+            for light in CarlaDataProvider.get_all_actors().filter('traffic.traffic_light'):
+                transform = light.get_transform()
+                volume = light.trigger_volume
+                # Transform.transform() also overwrites the point it is given: pass a copy
+                box = carla.Location(x=volume.location.x, y=volume.location.y, z=volume.location.z)
+                identities.append((light, transform.transform(box),
+                                   float(transform.rotation.yaw) + float(volume.rotation.yaw)))
+            OpenScenarioParser._light_identities = identities
+        return identities
+
+    @staticmethod
+    def get_traffic_lights_from_osc_name(name):
+        """
+        Return every carla.TrafficLight the signal name drives, nearest first
+
+        With vse_signal_<name> declared (standard files): every light whose trigger-box centre is
+        within VSE_SIGNAL_MATCH_M and heading within VSE_SIGNAL_MATCH_DEG of it (twins of one
+        approach and copied lights included); none raises with the nearest light's distance.
+        Otherwise the one light of get_traffic_light_from_osc_name.
+        """
+        position = OpenScenarioParser.vse_signal_position(name)
+        if position is None:
+            return [OpenScenarioParser.get_traffic_light_from_osc_name(name)]
+        centre, heading = position
+        identities = OpenScenarioParser._traffic_light_identities()
+        matches = []
+        nearest = (float("inf"), 0.0)
+        for light, light_centre, light_heading in identities:
+            distance = math.sqrt((light_centre.x - centre.x) ** 2 + (light_centre.y - centre.y) ** 2 +
+                                 (light_centre.z - centre.z) ** 2)
+            turn = abs(light_heading - heading) % 360.0
+            turn = min(turn, 360.0 - turn)
+            if distance < nearest[0]:
+                nearest = (distance, turn)
+            if distance <= OpenScenarioParser.VSE_SIGNAL_MATCH_M and turn <= OpenScenarioParser.VSE_SIGNAL_MATCH_DEG:
+                matches.append((distance, light))
+        if not matches:
+            where = "the map has no traffic lights" if not identities else \
+                "nearest trigger box {:.2f} m away, heading {:.0f} deg off".format(*nearest)
+            raise AttributeError(
+                "OpenSCENARIO: no traffic light within {} m / {:.0f} deg of signal {} ({:.2f}, {:.2f}, {:.2f}, "
+                "yaw {:.1f}): {}".format(OpenScenarioParser.VSE_SIGNAL_MATCH_M, OpenScenarioParser.VSE_SIGNAL_MATCH_DEG,
+                                         str(name).strip(), centre.x, centre.y, centre.z, heading, where))
+        matches.sort(key=lambda match: match[0])
+        return [light for _, light in matches]
+
     @staticmethod
     def get_traffic_light_from_osc_name(name):
         """
         Returns a carla.TrafficLight instance that matches the name given
 
         "id=<n>": CARLA actor id; "pos=x,y": the light within 2 m of (x, y) in CARLA's frame;
-        anything else: the light's OpenDRIVE signal id.
+        anything else: the light's OpenDRIVE signal id. A standard file declaring vse_signal_<name>:
+        the nearest light of that approach (see get_traffic_lights_from_osc_name).
         """
+        if OpenScenarioParser.vse_signal_position(name) is not None:
+            return OpenScenarioParser.get_traffic_lights_from_osc_name(name)[0]
+
         traffic_light = None
         lights = CarlaDataProvider.get_all_actors().filter('traffic.traffic_light')
 
@@ -382,6 +477,7 @@ class OpenScenarioParser(object):
         """
         OpenScenarioParser.global_osc_parameters = parameter_dict
         CarlaDataProvider.update_osc_global_params(parameter_dict)
+        OpenScenarioParser._light_identities = None  # a new file: sweep the map's lights again
 
     @staticmethod
     def get_catalog_entry(catalogs, catalog_reference):
@@ -1290,15 +1386,24 @@ class OpenScenarioParser(object):
                     traffic_light_action = infrastructure_action.find('TrafficSignalStateAction')
 
                     name_condition = traffic_light_action.attrib.get('name')
-                    traffic_light = OpenScenarioParser.get_traffic_light_from_osc_name(name_condition)
+                    if OpenScenarioParser.standard_semantics:
+                        # OpenSCENARIO: the state holds until the file changes it (TrafficLightHold)
+                        traffic_lights = OpenScenarioParser.get_traffic_lights_from_osc_name(name_condition)
+                        CarlaDataProvider.record_lights_frozen_before(traffic_lights[0])
+                    else:
+                        traffic_light = OpenScenarioParser.get_traffic_light_from_osc_name(name_condition)
 
                     tl_state = traffic_light_action.attrib.get('state').upper()
                     if tl_state not in OpenScenarioParser.tl_states:
                         raise KeyError("CARLA only supports Green, Red, Yellow or Off")
                     traffic_light_state = OpenScenarioParser.tl_states[tl_state]
 
-                    atomic = TrafficLightStateSetter(
-                        traffic_light, traffic_light_state, name=maneuver_name + "_" + str(traffic_light.id))
+                    if OpenScenarioParser.standard_semantics:
+                        atomic = TrafficLightHold(traffic_lights, traffic_light_state, name_condition.strip(),
+                                                  name=maneuver_name + "_" + name_condition.strip())
+                    else:
+                        atomic = TrafficLightStateSetter(
+                            traffic_light, traffic_light_state, name=maneuver_name + "_" + str(traffic_light.id))
                 elif infrastructure_action.find('TrafficSignalControllerAction') is not None:
                     traffic_light_controller_action = infrastructure_action.find('TrafficSignalControllerAction')
 
@@ -1348,7 +1453,13 @@ class OpenScenarioParser(object):
                         rule, value = '*', action_rule.find("MultiplyByValue").attrib.get('value')
                 else:
                     rule, value = None, parameter_action.find('SetAction').attrib.get('value')
-                atomic = ChangeParameter(parameter_ref, value=ParameterRef(value), rule=rule, name=maneuver_name)
+                released_signal = OpenScenarioParser.vse_signal_release(parameter_ref) if rule is None else None
+                if released_signal is not None:
+                    # Standard file: setting vse_signal_<name>_release ends that signal's light sequence
+                    atomic = TrafficLightRelease(released_signal, parameter_ref, value=ParameterRef(value),
+                                                 name=maneuver_name)
+                else:
+                    atomic = ChangeParameter(parameter_ref, value=ParameterRef(value), rule=rule, name=maneuver_name)
             elif global_action.find('EntityAction') is not None:
                 entity_action = global_action.find('EntityAction')
                 entity_ref = entity_action.attrib.get('entityRef')

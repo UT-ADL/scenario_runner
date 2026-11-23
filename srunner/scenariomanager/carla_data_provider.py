@@ -54,6 +54,10 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
     _traffic_light_map = {}     # type: dict[carla.TrafficLight, carla.Transform]
     _carla_actor_pool = {}      # type: dict[int, carla.Actor]
     _global_osc_parameters = {} # type: dict[str, Any] # type: ignore : suppresses the missing Any import
+    # Lights a standard OpenSCENARIO file holds (see hold_traffic_lights)
+    _held_lights = {}             # type: dict[str, list] # signal name -> the approach's held lights
+    _touched_lights = []          # type: list # lights set since the last release (for reset_group)
+    _lights_frozen_before = None  # map's is_frozen() before this run's first light change; None = not read
     _client = None              # type: carla.Client
     _world = None               # type: carla.World
     _map = None                 # type: carla.Map
@@ -120,6 +124,107 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         returns updated global osc parameter value.
         """
         return CarlaDataProvider._global_osc_parameters.get(ref.replace("$", ""))
+
+    @staticmethod
+    def record_lights_frozen_before(light):
+        """
+        Read once per run whether the map's lights are frozen before the scenario changes any
+
+        Frozen already means an earlier run left them so (e.g. killed with kill -9): one line says
+        so, and this run leaves them frozen when it releases its lights.
+        """
+        if CarlaDataProvider._lights_frozen_before is not None:
+            return
+        try:
+            frozen = bool(light.is_frozen())
+        except RuntimeError as e:
+            print("Traffic lights: could not read whether they are frozen ({}), taken as not frozen".format(e))
+            frozen = False
+        CarlaDataProvider._lights_frozen_before = frozen
+        if frozen:
+            print("Traffic lights already frozen at start: a previous run was killed? They stay frozen after this run")
+
+    @staticmethod
+    def hold_traffic_lights(signal, lights, state):
+        """
+        Set every light of one approach to state and hold it there; return the lights that are gone
+
+        As VSE Play does: freeze first (map-wide in CARLA's Python API, FreezeAllTrafficLights:
+        every light of the map stops cycling), then set_state, light by light. Phase times are
+        not touched (they cannot hold a state). The lights stay held until release_traffic_light_approach
+        or release_all_traffic_lights.
+        """
+        alive, dead = [], []
+        for light in lights:
+            (alive if light.is_alive else dead).append(light)
+        if alive:
+            CarlaDataProvider.record_lights_frozen_before(alive[0])
+        touched_ids = set(light.id for light in CarlaDataProvider._touched_lights)
+        for light in alive:
+            if light.id not in touched_ids:
+                CarlaDataProvider._touched_lights.append(light)
+                touched_ids.add(light.id)
+            light.freeze(True)
+            light.set_state(state)
+        if alive:
+            CarlaDataProvider._held_lights[signal] = alive
+        return dead
+
+    @staticmethod
+    def release_traffic_light_approach(signal):
+        """
+        The light sequence of one approach is over: release the lights once no approach is held
+
+        freeze(False) is map-wide, so while another approach is still held its release waits
+        (VSE Play does the same).
+        """
+        CarlaDataProvider._held_lights.pop(signal, None)
+        if CarlaDataProvider._held_lights:
+            if CarlaDataProvider._touched_lights:
+                print("Traffic signal {} done; lights released when signal(s) {} are done too (freeze is map-wide)"
+                      .format(signal, ", ".join(sorted(CarlaDataProvider._held_lights))))
+            return
+        CarlaDataProvider._release_touched_lights()
+
+    @staticmethod
+    def release_all_traffic_lights():
+        """
+        Release every light the scenario holds (its end, on every exit path); safe to call again
+        """
+        CarlaDataProvider._held_lights.clear()
+        CarlaDataProvider._release_touched_lights()
+        CarlaDataProvider._lights_frozen_before = None
+
+    @staticmethod
+    def _release_touched_lights():
+        """
+        freeze(False) unless the map was frozen before the run, then one reset_group per touched group
+        """
+        lights = CarlaDataProvider._touched_lights
+        CarlaDataProvider._touched_lights = []
+        if not lights:
+            return
+        try:
+            lights = [light for light in lights if light.is_alive]
+            if not lights:
+                return
+            if not CarlaDataProvider._lights_frozen_before:
+                for light in lights:
+                    light.freeze(False)
+            groups = set()
+            for light in lights:
+                group = frozenset(member.id for member in light.get_group_traffic_lights())
+                if group in groups:
+                    continue
+                groups.add(group)
+                light.reset_group()
+        except RuntimeError as e:
+            # The server is gone or does not answer: nothing left to release on it
+            print("Traffic lights: release failed ({})".format(e))
+            return
+        print("Traffic lights released ({} light(s), {} group(s){})".format(
+            len(lights), len(groups), ", map stays frozen as before the run" if CarlaDataProvider._lights_frozen_before
+            else ""))
 
     @staticmethod
     def register_actors(actors, transforms=None):
@@ -1073,6 +1178,9 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         """
         Cleanup and remove all entries from all dictionaries
         """
+        # Lights a scenario still holds (no-op when OpenScenario.terminate() released them already)
+        CarlaDataProvider.release_all_traffic_lights()
+
         DestroyActor = carla.command.DestroyActor       # pylint: disable=invalid-name
         batch = []
 

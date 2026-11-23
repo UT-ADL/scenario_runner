@@ -642,6 +642,19 @@ class OpenScenario(BasicScenario):
 
         return parallel_criteria
 
+    def terminate(self):
+        """
+        Terminate the tree, then release the traffic lights the scenario still holds
+
+        ScenarioManager.cleanup() calls this on every exit ScenarioRunner handles: the normal end,
+        a Storyboard stop, a failure, SIGINT/SIGTERM and exceptions (via _cleanup); it then calls
+        CarlaDataProvider.cleanup(), which releases them too when this was not reached.
+        """
+        try:
+            super(OpenScenario, self).terminate()
+        finally:
+            CarlaDataProvider.release_all_traffic_lights()
+
     def __del__(self):
         """
         Remove all actors upon deletion

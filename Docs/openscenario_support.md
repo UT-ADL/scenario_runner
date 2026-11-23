@@ -63,6 +63,32 @@ roslaunch autoware_mini start_carla.launch use_scenario_runner:=true map_name:=t
 or once in Autoware Mini's `launch/platform/carla/carla_scenario_runner.launch`, inside the
 OpenSCENARIO group: `<env name="VSE_XOSC_AGENT" value="$(arg agent_file)"/>`.
 
+**Traffic lights in standard files.** A `TrafficSignalStateAction` drives a whole approach and its
+state holds until the file changes it:
+
+- *Which lights.* When the file declares the file-level parameter `vse_signal_<name>` =
+  `"x y z yaw"` (VSE's export: the approach's trigger-box centre in CARLA's frame and its heading,
+  light yaw + trigger-box yaw), the action named `<name>` drives every CARLA light whose trigger-box
+  centre is within 0.5 m and whose heading is within 30 deg (an approach's twins and the map's
+  copied lights included). No such light: the file is refused with the nearest light's distance.
+  A `TrafficSignalCondition` with that name reads the nearest of them. Without the parameter the
+  name is looked up as before (`id=`, `pos=`, OpenDRIVE signal id). The name is never decoded.
+- *States.* `red`, `yellow`, `green`, `off` in any case, or lamp words red;yellow;green
+  (`on;off;off`, `off;on;off`, `off;off;on`, `off;off;off`, esmini's form).
+- *Hold.* Before the run's first light change the map's `is_frozen()` is read (frozen already: one
+  line says a previous run was probably killed). Each step freezes, then sets each light, as VSE
+  Play does. CARLA's `freeze()` is map-wide (`FreezeAllTrafficLights`): while a light is held,
+  every light of the map stops cycling. Phase times are not touched (they cannot hold a state).
+- *Release.* A `ParameterAction` that sets `vse_signal_<name>_release` (VSE writes it after the
+  last step's duration) ends that approach's sequence. Once no approach is held any more (release
+  waits while another sequence runs, since unfreezing is map-wide): `freeze(False)`, unless the map
+  was frozen before the run, then one `reset_group()` per group touched. The end of the scenario
+  releases whatever is still held, on every exit ScenarioRunner handles (normal end, Storyboard
+  stop, failure, Ctrl+C / SIGTERM, the watchdog, an exception). A `kill -9` leaves the map frozen.
+
+A file naming a CARLA town keeps the plain `set_state` (no freeze, no release) and ignores these
+parameters.
+
 ### Migrating OpenSCENARIO 0.9.x to 1.0
 The easiest way to convert old OpenSCENARIO samples to the official standard 1.0 is to use _xsltproc_ and the migration scheme located in the openscenario folder.
 Example:

@@ -227,6 +227,33 @@ class ChangeParameter(AtomicBehavior):
         return new_status
 
 
+class TrafficLightRelease(ChangeParameter):
+    """
+    Set a vse_signal_<id>_release parameter and end that signal's light sequence (standard files)
+
+    VSE's export sets it after the last step of a signal's sequence. The parameter is set as by
+    ChangeParameter; then the approach no longer counts as held, and the map's lights are released
+    once no approach is held (CarlaDataProvider.release_traffic_light_approach).
+
+    Args:
+        signal (str): the signal name (TrafficSignalStateAction name) whose sequence is over
+        parameter_ref (str): the parameter name
+        value (any): ParameterRef or number
+    """
+
+    def __init__(self, signal, parameter_ref, value, name="TrafficLightRelease"):
+        super(TrafficLightRelease, self).__init__(parameter_ref, value, rule=None, name=name)
+        self._signal = signal
+
+    def update(self):
+        """
+        Set the parameter, then release the signal's approach
+        """
+        new_status = super(TrafficLightRelease, self).update()
+        CarlaDataProvider.release_traffic_light_approach(self._signal)
+        return new_status
+
+
 class ChangeWeather(AtomicBehavior):
 
     """
@@ -3215,6 +3242,44 @@ class TrafficLightStateSetter(AtomicBehavior):
             new_status = py_trees.common.Status.FAILURE
 
         return new_status
+
+
+class TrafficLightHold(AtomicBehavior):
+
+    """
+    Set every light of one approach to a state that holds (standard OpenSCENARIO files)
+
+    The map's lights are frozen first (freeze is map-wide in CARLA's Python API), then each light
+    gets the state, as VSE Play does (CarlaDataProvider.hold_traffic_lights). The lights stay held
+    after this behavior succeeds, until the signal's release parameter is set (TrafficLightRelease)
+    or the scenario ends (OpenScenario.terminate / CarlaDataProvider.cleanup).
+
+    Args:
+        lights (list(carla.TrafficLight)): the lights of the approach
+        state (carla.TrafficLightState): new state
+        signal (str): the signal name (TrafficSignalStateAction name)
+
+    Succeeds once the lights are set; fails when one of them is gone (printed, the others are set).
+    """
+
+    def __init__(self, lights, state, signal, name="TrafficLightHold"):
+        super(TrafficLightHold, self).__init__(name)
+        self._lights = list(lights)
+        self._state = state
+        self._signal = signal
+
+    def update(self):
+        """
+        Freeze, then set the state of every light of the approach
+        """
+        dead = CarlaDataProvider.hold_traffic_lights(self._signal, self._lights, self._state)
+        if dead:
+            print("Traffic signal {}: light(s) {} gone (world reloaded?), not set to {}".format(
+                self._signal, ", ".join(str(light.id) for light in dead), self._state))
+            return py_trees.common.Status.FAILURE
+        print("Traffic signal {}: {} light(s) {} at {:.2f} s".format(
+            self._signal, len(self._lights), self._state, GameTime.get_time()))
+        return py_trees.common.Status.SUCCESS
 
 
 class TrafficLightControllerSetter(AtomicBehavior):
