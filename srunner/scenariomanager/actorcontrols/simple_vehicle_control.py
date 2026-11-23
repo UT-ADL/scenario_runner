@@ -43,7 +43,8 @@ class SimpleVehicleControl(BasicControl):
 
     The controller can also respect red traffic lights, and use a given deceleration
     value for more realistic behavior. Both behaviors are activated via the corresponding
-    controller arguments.
+    controller arguments. With comfort_acceleration / comfort_deceleration the speed changes
+    at a comfortable rate, braking harder only when an obstacle or a red light needs it.
 
     Args:
         actor (carla.Actor): Vehicle actor that should be controlled.
@@ -54,9 +55,12 @@ class SimpleVehicleControl(BasicControl):
                                         (obstacle_margin, distance)          - Gap kept to an obstacle: the speed
                                                                                is matched this far before it
                                                                                (default 0 = at the obstacle)
-                                        (obstacle_path_width, distance)      - Only obstacles within this XY
+                                        (obstacle_path_width, distance)      - Only obstacles whose bounding
+                                                                               box (XY) comes within this
                                                                                distance of the actor's own path
-                                                                               (its remaining points) count
+                                                                               (its remaining points) count; the
+                                                                               distance from the path to the
+                                                                               obstacle's box, 0 if they overlap
                                                                                (default: every obstacle the sensor
                                                                                sees, straight ahead)
                                         (waypoint_reached_threshold, distance) - Distance between actor and waypoint
@@ -66,6 +70,18 @@ class SimpleVehicleControl(BasicControl):
                                                                                this vehicle
                                         (max_acceleration, float)            - Use a reasonable acceleration value for
                                                                                this vehicle
+                                        (comfort_deceleration, float)        - Braking rate [m/s2]: the speed falls
+                                                                               by at most this much per second, or
+                                                                               by what an obstacle or a red light
+                                                                               needs (see _set_new_velocity); a tick
+                                                                               needing more than
+                                                                               MAX_NEEDED_DECELERATION is stock.
+                                                                               Wins over max_deceleration; not on
+                                                                               a timed path
+                                        (comfort_acceleration, float)        - The speed rises by at most this much
+                                                                               per second [m/s2]. Wins over
+                                                                               max_acceleration; not on a timed
+                                                                               path
                                         (attach_camera, true/false)          - Attach OpenCV display to actor
                                                                                (useful for debugging)
 
@@ -94,6 +110,26 @@ class SimpleVehicleControl(BasicControl):
             Defaults to None.
     """
 
+    # With comfort_deceleration: the hardest braking [m/s2] an obstacle or a red light may ask for, about a full stop
+    # on dry asphalt. A tick that needs more (an obstacle first sensed too close, within obstacle_margin, a red light
+    # seen too late) is stock -- its instant stop or target -- so the car avoids whatever stock avoids.
+    MAX_NEEDED_DECELERATION = 9.0
+    # s; the longest time one call may move the speed by under the comfort limits: a longer gap since the last
+    # command (a car that stood at a reached goal, then got a new path) would otherwise allow the jump they prevent.
+    _MAX_RATE_STEP_S = 0.25
+    # m; a red light's stop waypoint counts as this actor's stop line only this far beside its heading line (the
+    # light's other lanes are a lane width or more away; the nearest one is taken).
+    _STOP_LINE_LATERAL_M = 5.0
+    # m/s; the comfort limits step from the last commanded speed while the measured one stays this close to it
+    # (physics takes a little drag off each tick; stepping from the measured speed added that drag to every step, and
+    # a drag above comfort_acceleration kept the car below its target for good). Further off (blocked, teleported):
+    # the measured speed.
+    _FOLLOW_TOLERANCE_MPS = 1.0
+    # m; with comfort_deceleration the speed behind an obstacle aims this far outside obstacle_margin: aimed at the
+    # margin itself a car following at the obstacle's speed sat on its edge, and any rounding there meant "within the
+    # margin: stop" (a saw-tooth every 1.5 s in a 20 Hz simulation).
+    _FOLLOW_BUFFER_M = 0.5
+
     def __init__(self, actor, args=None):
         super(SimpleVehicleControl, self).__init__(actor)
         self._generated_waypoint_list = []
@@ -106,10 +142,18 @@ class SimpleVehicleControl(BasicControl):
         self._waypoint_reached_threshold = 4.0
         self._max_deceleration = None
         self._max_acceleration = None
+        self._comfort_deceleration = None
+        self._comfort_acceleration = None
 
         self._obstacle_sensor = None
         self._obstacle_distance = float('inf')
         self._obstacle_actor = None
+        # Read once per actor (actor.bounding_box is a blocking RPC on CARLA 0.9.16, ~11 ms): obstacle boxes by
+        # actor id, red-light stop points by light id, and this actor's half length.
+        self._obstacle_boxes = {}
+        self._stop_lines = {}
+        self._half_length = None
+        self._commanded_speed = None    # m/s; the speed of the last velocity _set_new_velocity set
 
         self._visualizer = None
 
@@ -124,8 +168,9 @@ class SimpleVehicleControl(BasicControl):
                 bp.set_attribute('distance', str(max(float(args['proximity_threshold']), 250)))
             bp.set_attribute('hit_radius', '1')
             bp.set_attribute('only_dynamics', 'True')
+            self._half_length = self._actor.bounding_box.extent.x
             self._obstacle_sensor = CarlaDataProvider.get_world().spawn_actor(
-                bp, carla.Transform(carla.Location(x=self._actor.bounding_box.extent.x, z=1.0)), attach_to=self._actor)
+                bp, carla.Transform(carla.Location(x=self._half_length, z=1.0)), attach_to=self._actor)
             self._obstacle_sensor.listen(lambda event: self._on_obstacle(event))  # pylint: disable=unnecessary-lambda
 
         if args and 'obstacle_margin' in args:
@@ -137,6 +182,8 @@ class SimpleVehicleControl(BasicControl):
             # The obstacle sensor is a straight channel: it also brakes for traffic CROSSING in front, which the
             # car's own (curving) path never meets -- 11-23 two NPC bikes stopped for the ego crossing their junction
             # and the ego waited for them for good. VSE Play's NPC agent looks along its own route instead.
+            # Measured to the obstacle's box, not its centre: 11-24 a bus whose centre was 2.6 m off a bike's path
+            # (its side 0.6 m) did not count and the bike squeezed past its back corner with 0.2-0.6 m to spare.
             self._obstacle_path_width = max(float(args['obstacle_path_width']), 0.0)
 
         if args and 'consider_trafficlights' in args and strtobool(args['consider_trafficlights']):
@@ -151,31 +198,124 @@ class SimpleVehicleControl(BasicControl):
         if args and 'max_acceleration' in args:
             self._max_acceleration = float(args['max_acceleration'])
 
+        # The velocity is set directly: 11-24 VSE's NPC bikes went 13 -> 0.4 -> 13 m/s from one 0.2 s sample to the
+        # next behind a slowing bus (0 within the margin, full speed again as soon as the bus was no slower). The
+        # stock max_deceleration is a hard cap (no harder braking even to avoid a crash), so these are separate.
+        if args and 'comfort_deceleration' in args:
+            self._comfort_deceleration = max(float(args['comfort_deceleration']), 0.0)
+
+        if args and 'comfort_acceleration' in args:
+            self._comfort_acceleration = max(float(args['comfort_acceleration']), 0.0)
+
         if args and 'attach_camera' in args and strtobool(args['attach_camera']):
             self._visualizer = Visualizer(self._actor)
+
+    def _obstacle_box(self, actor):
+        """
+        Return the actor's bounding box as (x, y offset from the actor, half length, half width, yaw offset [deg]),
+        read once per actor id: actor.bounding_box is a blocking RPC on CARLA 0.9.16 (~11 ms), too slow per tick
+        """
+        box = self._obstacle_boxes.get(actor.id)
+        if box is None:
+            try:
+                bbox = actor.bounding_box
+                box = (bbox.location.x, bbox.location.y, bbox.extent.x, bbox.extent.y,
+                       getattr(getattr(bbox, 'rotation', None), 'yaw', 0.0))
+            except (AttributeError, RuntimeError) as exc:
+                # No box to read: measure to its centre, as before the box was used.
+                print("simple_vehicle_control: no bounding box for obstacle {} ({}), using its centre".format(
+                    actor.id, exc))
+                box = (0.0, 0.0, 0.0, 0.0, 0.0)
+            self._obstacle_boxes[actor.id] = box
+        return box
 
     def _obstacle_on_path(self):
         """
         True when the sensed obstacle counts: no obstacle_path_width set (stock), no path to compare with, or the
-        obstacle within obstacle_path_width (XY) of the actor's remaining path (from the actor through its points)
+        obstacle's bounding box (XY, turned by its yaw) within obstacle_path_width of the actor's remaining path
+        (from the actor through its points)
         """
         if self._obstacle_path_width is None or self._obstacle_actor is None or not self._waypoints:
             return True
         try:
-            other = CarlaDataProvider.get_location(self._obstacle_actor) or self._obstacle_actor.get_location()
+            box_x, box_y, half_length, half_width, box_yaw = self._obstacle_box(self._obstacle_actor)
+            # The obstacle's own snapshot (no RPC): CarlaDataProvider only caches the actors it tracks, and says
+            # "not found" every tick for the others (e.g. traffic not spawned by the scenario).
+            other = self._obstacle_actor.get_transform()
             here = CarlaDataProvider.get_location(self._actor)
         except RuntimeError:
             return True
         if other is None or here is None:
             return True
-        points = [(here.x, here.y)] + [(wp.location.x, wp.location.y) for wp in self._waypoints]
-        for (ax, ay), (bx, by) in zip(points, points[1:]):
-            dx, dy = bx - ax, by - ay
-            seg2 = dx * dx + dy * dy
-            f = 0.0 if seg2 <= 1e-9 else max(0.0, min(1.0, ((other.x - ax) * dx + (other.y - ay) * dy) / seg2))
-            if math.hypot(ax + f * dx - other.x, ay + f * dy - other.y) <= self._obstacle_path_width:
+        yaw = math.radians(other.rotation.yaw)
+        centre_x = other.location.x + box_x * math.cos(yaw) - box_y * math.sin(yaw)
+        centre_y = other.location.y + box_x * math.sin(yaw) + box_y * math.cos(yaw)
+        yaw = math.radians(other.rotation.yaw + box_yaw)
+        cos_yaw, sin_yaw = math.cos(yaw), math.sin(yaw)
+        # The path in the box's frame (box centre at the origin, its length along x)
+        points = []
+        for x, y in [(here.x, here.y)] + [(wp.location.x, wp.location.y) for wp in self._waypoints]:
+            dx, dy = x - centre_x, y - centre_y
+            points.append((dx * cos_yaw + dy * sin_yaw, -dx * sin_yaw + dy * cos_yaw))
+        for start, end in zip(points, points[1:]):
+            if _segment_box_distance(start, end, half_length, half_width) <= self._obstacle_path_width:
                 return True
         return False
+
+    def _own_half_length(self):
+        """
+        Return half the actor's length [m] (its bounding box, read once); 0 when it has none
+        """
+        if self._half_length is None:
+            try:
+                self._half_length = float(self._actor.bounding_box.extent.x)
+            except (AttributeError, RuntimeError) as exc:
+                print("simple_vehicle_control: no bounding box for {} ({}), stop lines measured from its "
+                      "centre".format(getattr(self._actor, 'id', '?'), exc))
+                self._half_length = 0.0
+        return self._half_length
+
+    def _stop_line_gap(self):
+        """
+        Return the distance [m] from the actor's front to the stop line of the traffic light it is at (the light's
+        stop waypoint ahead of its centre, the one nearest its heading line), or None when there is none
+        """
+        try:
+            light = self._actor.get_traffic_light()
+            here = CarlaDataProvider.get_transform(self._actor)
+            if light is not None and light.id not in self._stop_lines:
+                # get_stop_waypoints walks the map from the light's trigger volume: once per light.
+                self._stop_lines[light.id] = [(wp.transform.location.x, wp.transform.location.y)
+                                              for wp in light.get_stop_waypoints()]
+        except RuntimeError as exc:
+            print("simple_vehicle_control: no stop line for the red light ({}), braking as hard as "
+                  "allowed".format(exc))
+            return None
+        if light is None or here is None:
+            return None
+        yaw = math.radians(here.rotation.yaw)
+        forward_x, forward_y = math.cos(yaw), math.sin(yaw)
+        ahead = []      # (beside, along) of each stop point ahead
+        for x, y in self._stop_lines[light.id]:
+            dx, dy = x - here.location.x, y - here.location.y
+            along, beside = dx * forward_x + dy * forward_y, abs(dy * forward_x - dx * forward_y)
+            if along > 0.0 and beside <= self._STOP_LINE_LATERAL_M:
+                ahead.append((beside, along))
+        if not ahead:
+            return None
+        return min(ahead)[1] - self._own_half_length()
+
+    def _red_light_deceleration(self, speed):
+        """
+        Return the deceleration [m/s2] that stops the actor's front at the stop line of the red light it is at;
+        infinite when no line is left ahead of its front
+        """
+        if speed <= 0.0:
+            return 0.0
+        gap = self._stop_line_gap()
+        if gap is None or gap <= 0.0:
+            return float('inf')
+        return speed * speed / (2.0 * gap)
 
     def _on_obstacle(self, event):
         """
@@ -318,6 +458,38 @@ class SimpleVehicleControl(BasicControl):
 
         return offset_location
 
+    def _comfort_limited(self):
+        """
+        True when comfort_acceleration or comfort_deceleration is set and the path is not timed (a timed path's speed
+        comes from its vertex times: limiting it would put the car behind schedule)
+        """
+        return not self._timed_path and (self._comfort_acceleration is not None or
+                                         self._comfort_deceleration is not None)
+
+    def _base_speed(self, current_speed):
+        """
+        Return the speed the comfort limits step from: the last commanded speed while current_speed stays within
+        _FOLLOW_TOLERANCE_MPS of it, else (blocked, teleported, the first call) current_speed
+        """
+        if self._commanded_speed is None or abs(current_speed - self._commanded_speed) > self._FOLLOW_TOLERANCE_MPS:
+            return current_speed
+        return self._commanded_speed
+
+    def _counted_obstacle(self):
+        """
+        Return (distance past obstacle_margin, its speed) of the sensed obstacle that counts (consider_obstacles,
+        within proximity_threshold and on the path), its speed None within the margin; None when there is none
+        """
+        if not self._consider_obstacles:
+            return None
+        if not (self._obstacle_distance < self._proximity_threshold and self._obstacle_on_path()):
+            return None
+        distance = max(self._obstacle_distance - self._obstacle_margin, 0)
+        if distance <= 0:
+            return distance, None
+        return distance, math.sqrt(
+            self._obstacle_actor.get_velocity().x**2 + self._obstacle_actor.get_velocity().y**2)
+
     def _set_new_velocity(self, next_location):
         """
         Calculate and set the new actor veloctiy given the current actor
@@ -329,6 +501,16 @@ class SimpleVehicleControl(BasicControl):
         traffic light.
         If _max_deceleration is set, the vehicle will reduce its speed according to the
         given deceleration value.
+        If _comfort_deceleration is set, the speed falls by at most max(_comfort_deceleration, needed)
+        per second, needed being what the obstacle asks for (its speed matched obstacle_margin before
+        it: 0.5 dv^2 / d) or the red light (stopped at its stop line: 0.5 v^2 / d); behind an obstacle
+        it is also kept at most the obstacle's speed plus sqrt(2 * _comfort_deceleration *
+        (d - _FOLLOW_BUFFER_M)), what that braking still matches just outside the margin.
+        If _comfort_acceleration is set, the speed rises by at most that much per second.
+        The comfort limits step from the last commanded speed (see _base_speed), win over the max_*
+        limit of their direction and do not apply on a timed path (its vertex times set the speed), nor
+        in a tick that needs more than MAX_NEEDED_DECELERATION (within the margin, an obstacle first
+        sensed too close, a red light too late): that tick is stock.
         If the vehicle reduces its speed, braking lights will be activated.
 
         Args:
@@ -346,31 +528,58 @@ class SimpleVehicleControl(BasicControl):
 
         current_speed = math.sqrt(self._actor.get_velocity().x**2 + self._actor.get_velocity().y**2)
 
-        if self._consider_obstacles:
-            # If distance is less than the proximity threshold, adapt velocity
-            if self._obstacle_distance < self._proximity_threshold and self._obstacle_on_path():
-                distance = max(self._obstacle_distance - self._obstacle_margin, 0)
-                if distance > 0:
-                    current_speed_other = math.sqrt(
-                        self._obstacle_actor.get_velocity().x**2 + self._obstacle_actor.get_velocity().y**2)
-                    if current_speed_other < current_speed:
-                        acceleration = -0.5 * (current_speed - current_speed_other)**2 / distance
-                        target_speed = max(acceleration * (current_time - self._last_update) + current_speed, 0)
-                else:
-                    target_speed = 0
+        # What the obstacle and a red light ask for (from the measured speeds); only comfort_deceleration reads it.
+        obstacle = self._counted_obstacle()
+        red_light = (self._consider_traffic_lights and self._actor.is_at_traffic_light() and
+                     self._actor.get_traffic_light_state() == carla.TrafficLightState.Red)
+        acceleration = None         # the stock obstacle law's (negative) acceleration, when it brakes
+        needed_deceleration = 0.0   # m/s2
+        if obstacle is not None:
+            distance, current_speed_other = obstacle
+            if distance <= 0:
+                needed_deceleration = float('inf')      # within the margin: no distance left to brake in
+            elif current_speed_other < current_speed:
+                acceleration = -0.5 * (current_speed - current_speed_other)**2 / distance
+                needed_deceleration = -acceleration
+        comfort = self._comfort_limited()
+        if comfort and red_light and self._comfort_deceleration is not None:
+            needed_deceleration = max(needed_deceleration, self._red_light_deceleration(current_speed))
+        if needed_deceleration > self.MAX_NEEDED_DECELERATION:
+            comfort = False         # more than the comfort limits may brake: this tick is stock
+        # The speed this call steps from: the measured one (stock), the commanded one under the comfort limits
+        speed = self._base_speed(current_speed) if comfort else current_speed
+        # s; a gap longer than _MAX_RATE_STEP_S since the last command moves the speed by that much only
+        comfort_step = max(min(current_time - self._last_update, self._MAX_RATE_STEP_S), 0.0)
 
-        if self._consider_traffic_lights:
-            if (self._actor.is_at_traffic_light() and
-                    self._actor.get_traffic_light_state() == carla.TrafficLightState.Red):
+        if obstacle is not None:
+            # If distance is less than the proximity threshold, adapt velocity
+            distance, current_speed_other = obstacle
+            if distance > 0:
+                if acceleration is not None:
+                    target_speed = max(acceleration * (current_time - self._last_update) + speed, 0)
+                if comfort and self._comfort_deceleration is not None:
+                    # No faster than comfort_deceleration still brings down to the obstacle's speed just outside
+                    # the margin. Without it the target went back to full speed whenever the car was no faster
+                    # than the obstacle, overshot and stopped within the margin: a saw-tooth behind a bus.
+                    target_speed = min(target_speed, current_speed_other + math.sqrt(
+                        2.0 * self._comfort_deceleration * max(distance - self._FOLLOW_BUFFER_M, 0.0)))
+            else:
                 target_speed = 0
 
-        if target_speed < current_speed:
+        if red_light:
+            target_speed = 0
+
+        if target_speed < speed:
             if not self._brake_lights_active:
                 self._brake_lights_active = True
                 light_state = self._actor.get_light_state()
                 light_state |= carla.VehicleLightState.Brake
                 self._actor.set_light_state(carla.VehicleLightState(light_state))
-            if self._max_deceleration is not None:
+            if comfort and self._comfort_deceleration is not None:
+                # needed_deceleration is at most MAX_NEEDED_DECELERATION here (else the tick is stock)
+                target_speed = max(target_speed,
+                                   speed - comfort_step * max(self._comfort_deceleration, needed_deceleration))
+            elif self._max_deceleration is not None:
                 target_speed = max(target_speed, current_speed - (current_time -
                                                                   self._last_update) * self._max_deceleration)
         else:
@@ -379,7 +588,11 @@ class SimpleVehicleControl(BasicControl):
                 light_state = self._actor.get_light_state()
                 light_state &= ~carla.VehicleLightState.Brake
                 self._actor.set_light_state(carla.VehicleLightState(light_state))
-            if self._max_acceleration is not None:
+            if comfort and self._comfort_acceleration is not None:
+                # Below 0.5 m/s the vehicle may not properly accelerate: bumped to 0.5 m/s if the target allows.
+                target_speed = max(min(target_speed, speed + comfort_step * self._comfort_acceleration),
+                                   min(0.5, target_speed))
+            elif self._max_acceleration is not None:
                 tmp_speed = min(target_speed, current_speed + (current_time -
                                                                self._last_update) * self._max_acceleration)
                 # If the tmp_speed is < 0.5 the vehicle may not properly accelerate.
@@ -395,12 +608,14 @@ class SimpleVehicleControl(BasicControl):
             # differ from the live one run_step measured): count it as reached instead of
             # dividing by zero.
             self._actor.set_target_velocity(velocity)
+            self._commanded_speed = 0.0
             self._last_update = current_time
             return direction_norm
         velocity.x = direction.x / direction_norm * target_speed
         velocity.y = direction.y / direction_norm * target_speed
 
         self._actor.set_target_velocity(velocity)
+        self._commanded_speed = target_speed
 
         # set new angular velocity
         current_yaw = CarlaDataProvider.get_transform(self._actor).rotation.yaw
@@ -430,3 +645,35 @@ class SimpleVehicleControl(BasicControl):
         self._last_update = current_time
 
         return direction_norm
+
+
+def _segment_box_distance(start, end, half_length, half_width):
+    """
+    Return the XY distance from the segment start-end ((x, y) each, in the box's frame) to the box
+    |x| <= half_length, |y| <= half_width; 0 when they overlap
+    """
+    (ax, ay), (bx, by) = start, end
+    dx, dy = bx - ax, by - ay
+    # Overlap: clip the segment to the box (Liang-Barsky); something left = they meet.
+    t_in, t_out = 0.0, 1.0
+    for p, q in ((-dx, ax + half_length), (dx, half_length - ax), (-dy, ay + half_width), (dy, half_width - ay)):
+        if p == 0.0:
+            if q < 0.0:
+                break
+        elif p < 0.0:
+            t_in = max(t_in, q / p)
+        else:
+            t_out = min(t_out, q / p)
+        if t_in > t_out:
+            break
+    else:
+        return 0.0
+    # Apart: the closest pair has a segment end or a box corner in it.
+    best = min(math.hypot(max(abs(x) - half_length, 0.0), max(abs(y) - half_width, 0.0))
+               for x, y in ((ax, ay), (bx, by)))
+    seg2 = dx * dx + dy * dy
+    for corner_x in (-half_length, half_length):
+        for corner_y in (-half_width, half_width):
+            f = 0.0 if seg2 <= 1e-12 else max(0.0, min(1.0, ((corner_x - ax) * dx + (corner_y - ay) * dy) / seg2))
+            best = min(best, math.hypot(ax + f * dx - corner_x, ay + f * dy - corner_y))
+    return best

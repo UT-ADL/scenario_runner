@@ -94,6 +94,36 @@ state holds until the file changes it:
 A file naming a CARLA town keeps the plain `set_state` (no hold, no release) and ignores these
 parameters.
 
+**`simple_vehicle_control` properties.** Besides the stock ones (`consider_obstacles`,
+`proximity_threshold`, `consider_trafficlights`, `max_acceleration`, `max_deceleration`, ...), the
+controller takes these; a property not given keeps the stock behaviour, and the stock ones keep
+theirs.
+
+| Property | Unit | What it does |
+| --- | --- | --- |
+| `obstacle_margin` | m | With `consider_obstacles`: the obstacle's speed is matched this far before it and the car holds still within it (stock: bumper to bumper) |
+| `obstacle_path_width` | m | With `consider_obstacles`: a sensed obstacle counts only when the distance from the car's remaining path (from the car through its waypoints) to the obstacle's box (its bounding box in XY, turned by its yaw) is at most this; 0 when they overlap. The box is read once per obstacle (on CARLA 0.9.16 `bounding_box` is a blocking call). Free driving (no path) counts every obstacle (stock: every obstacle in the sensor's straight channel) |
+| `comfort_acceleration` | m/s2 | The commanded speed rises by at most this much per second of simulation time (from a standstill it may start at 0.5 m/s, as stock) |
+| `comfort_deceleration` | m/s2 | The commanded speed falls by at most this much per second, or by what an obstacle or a red light needs if that is more: the deceleration that matches the obstacle's speed `obstacle_margin` before it (0.5 dv^2 / d), or stops the car's front at the red light's stop line (0.5 v^2 / d, the light's stop waypoint in the car's lane). Behind an obstacle the speed is also kept at most its speed plus sqrt(2 * `comfort_deceleration` * (d - 0.5 m)), so a car following at the obstacle's speed stays about 0.5 m outside the margin |
+
+How the comfort limits work:
+
+- They step from the speed the controller commanded last, not the measured one (physics takes a
+  little off every tick), unless the measured speed is more than 1 m/s off it (blocked, teleported).
+  A pause since the last command counts as at most 0.25 s.
+- A tick that needs more than 9 m/s2 is stock: within the margin, an obstacle first sensed too close
+  (a cut-in 6 m ahead at 13 m/s), a red light seen too late or with no stop line found. The car then
+  stops or brakes exactly as without the comfort limits, so it avoids whatever stock avoids, and
+  starts again at `comfort_acceleration`.
+- They do not apply on a timed path (`Timing`): its vertex times set the speed.
+- Where a comfort property and the stock limit of the same direction are both set, the comfort one
+  wins; the other direction keeps the stock one. The stock `max_acceleration` / `max_deceleration`
+  are unchanged: a hard limit stepping from the measured speed, timed paths included, so
+  `max_deceleration` never brakes harder, even to avoid a crash.
+
+Without them the velocity is set directly: a car behind a slowing vehicle went 13 -> 0 -> 13 m/s from
+one tick to the next (VSE's Tartu lap, 2026-11-24).
+
 ### Migrating OpenSCENARIO 0.9.x to 1.0
 The easiest way to convert old OpenSCENARIO samples to the official standard 1.0 is to use _xsltproc_ and the migration scheme located in the openscenario folder.
 Example:

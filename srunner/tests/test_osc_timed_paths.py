@@ -16,7 +16,9 @@ Pinned contracts:
   new waypoints are untimed until ChangeActorWaypoints marks them timed;
 - the speed uses the flat (XY) distance: vertices above or below the actor (a spawn above its first
   point, a track's own z) ask for no extra speed; two vertices at one XY are a hold: speed 0 there,
-  the car stays put and drives on afterwards (VSE's timed tracks write a stop that way).
+  the car stays put and drives on afterwards (VSE's timed tracks write a stop that way);
+- the controller's comfort_acceleration / comfort_deceleration do not apply on a timed path: it drives exactly
+  as without them (on schedule), though its speed jumps far more than they would allow.
 """
 
 import types
@@ -82,15 +84,16 @@ def _state(monkeypatch):
     py_trees.blackboard.Blackboard().set("ActorsWithController", {}, overwrite=True)
 
 
-def _drive(rows, tick, extra=1.0, track=None, start_dy=0.0):
+def _drive(rows, tick, extra=1.0, track=None, start_dy=0.0, args=None):
     """
-    Run a timed path of rows (time, x, y[, z]) on simple_vehicle_control; return the car, the target
-    speed of every tick and the action's end time (track: a list that gets (time, x) every tick).
+    Run a timed path of rows (time, x, y[, z]) on simple_vehicle_control (args: its properties); return the
+    car, the target speed of every tick and the action's end time (track: a list that gets (time, x) every
+    tick).
     """
     rows = [row if len(row) == 4 else (row[0], row[1], row[2], 0.0) for row in rows]
     car = _Car(rows[0][1], rows[0][2] + start_dy)
     control = ActorControl.__new__(ActorControl)
-    control.control_instance = SimpleVehicleControl(car)
+    control.control_instance = SimpleVehicleControl(car, args)
     py_trees.blackboard.Blackboard().set("ActorsWithController", {car.id: control}, overwrite=True)
     positions = [ET.fromstring('<Position><WorldPosition x="%r" y="%r" z="%r"/></Position>' % (x, y, z))
                  for _, x, y, z in rows]
@@ -211,3 +214,20 @@ def test_two_vertices_at_one_xy_are_a_hold(start_dy):
     assert held and max(abs(x - 25.0) for x in held) <= 0.5
     assert abs(car.location.x - 50.0) <= 0.5
     assert max(speeds) <= 5.0 * 1.5
+
+
+def test_comfort_limits_leave_a_timed_path_on_schedule():
+    # 10 m/s from a standstill to x=50 by t=5, a hold at x=50 until t=7, then on to x=100 by t=12.
+    rows = [(round(t * 0.1, 6), t * 0.1 * 10.0, 0.0) for t in range(51)]
+    rows += [(7.0, 50.0, 0.0)]
+    rows += [(round(7.0 + t * 0.1, 6), 50.0 + t * 0.1 * 10.0, 0.0) for t in range(1, 51)]
+    plain, limited = [], []
+    car, speeds, ended = _drive(rows, 0.05, track=plain)
+    GameTime.restart()
+    car_limited, speeds_limited, ended_limited = _drive(
+        rows, 0.05, track=limited, args={'comfort_acceleration': '4.0', 'comfort_deceleration': '2.5'})
+    assert limited == plain and speeds_limited == speeds and ended_limited == ended
+    assert abs(car_limited.location.x - 100.0) <= 0.5
+    # ... although the path's own speed jumps by far more than 4 m/s2 or 2.5 m/s2 allow in a tick.
+    moved = [(b - a) / 0.05 for (_, a), (_, b) in zip(plain, plain[1:])]
+    assert max(abs(b - a) for a, b in zip(moved, moved[1:])) > 5.0
