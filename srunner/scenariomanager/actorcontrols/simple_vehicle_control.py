@@ -51,6 +51,9 @@ class SimpleVehicleControl(BasicControl):
                            May include: (consider_obstacles, true/false)     - Enable consideration of obstacles
                                         (proximity_threshold, distance)      - Distance in front of actor in which
                                                                                obstacles are considered
+                                        (obstacle_margin, distance)          - Gap kept to an obstacle: the speed
+                                                                               is matched this far before it
+                                                                               (default 0 = at the obstacle)
                                         (waypoint_reached_threshold, distance) - Distance between actor and waypoint
                                                                                determining reached or not
                                         (consider_trafficlights, true/false) - Enable consideration of traffic lights
@@ -93,6 +96,7 @@ class SimpleVehicleControl(BasicControl):
         self._consider_traffic_lights = False
         self._consider_obstacles = False
         self._proximity_threshold = float('inf')
+        self._obstacle_margin = 0.0
         self._waypoint_reached_threshold = 4.0
         self._max_deceleration = None
         self._max_acceleration = None
@@ -117,6 +121,11 @@ class SimpleVehicleControl(BasicControl):
             self._obstacle_sensor = CarlaDataProvider.get_world().spawn_actor(
                 bp, carla.Transform(carla.Location(x=self._actor.bounding_box.extent.x, z=1.0)), attach_to=self._actor)
             self._obstacle_sensor.listen(lambda event: self._on_obstacle(event))  # pylint: disable=unnecessary-lambda
+
+        if args and 'obstacle_margin' in args:
+            # The stock braking reaches the obstacle's speed AT it (0.5 dv^2 / d): bumper to bumper. VSE's export
+            # asks for a gap (11-23: an NPC following a stopped ego stopped 0-0.3 m from its bumper).
+            self._obstacle_margin = max(float(args['obstacle_margin']), 0.0)
 
         if args and 'consider_trafficlights' in args and strtobool(args['consider_trafficlights']):
             self._consider_traffic_lights = strtobool(args['consider_trafficlights'])
@@ -305,7 +314,7 @@ class SimpleVehicleControl(BasicControl):
         if self._consider_obstacles:
             # If distance is less than the proximity threshold, adapt velocity
             if self._obstacle_distance < self._proximity_threshold:
-                distance = max(self._obstacle_distance, 0)
+                distance = max(self._obstacle_distance - self._obstacle_margin, 0)
                 if distance > 0:
                     current_speed_other = math.sqrt(
                         self._obstacle_actor.get_velocity().x**2 + self._obstacle_actor.get_velocity().y**2)

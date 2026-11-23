@@ -12,6 +12,8 @@ Pinned contracts:
   NaN, whatever the height difference.
 - simple_vehicle_control without waypoints (free driving, e.g. an NPC waiting for its trigger) holds
   still at a dead end instead of raising IndexError, and drives on where the lane goes on.
+- simple_vehicle_control's obstacle_margin: the speed is matched that far before the obstacle (stopped
+  within it), without it at the obstacle as before.
 """
 
 import math
@@ -156,3 +158,50 @@ def test_free_driving_vehicle_drives_on_where_the_lane_goes_on(monkeypatch):
     vehicle, control = _free_driving(monkeypatch, vehicle_x=0.0, lane_end_x=100.0, speed=5.0)
     control.run_step()
     assert vehicle.velocities[-1].x == pytest.approx(5.0)
+
+
+class _MovingVehicle(_FakeVehicle):
+    def __init__(self, x, speed):
+        super(_MovingVehicle, self).__init__(x)
+        self._speed = speed
+
+    def get_velocity(self):
+        return carla.Vector3D(x=self._speed)
+
+
+class _StoppedCar(object):
+    def get_velocity(self):
+        return carla.Vector3D()
+
+
+def _obstacle_step(monkeypatch, args, obstacle_distance, speed=8.0):
+    vehicle = _MovingVehicle(0.0, speed)
+    monkeypatch.setattr(CarlaDataProvider, "get_location", staticmethod(lambda actor: actor.get_location()))
+    monkeypatch.setattr(CarlaDataProvider, "get_transform", staticmethod(lambda actor: actor.get_transform()))
+    monkeypatch.setattr(CarlaDataProvider, "get_map",
+                        staticmethod(lambda world=None: _FakeLaneMap(1000.0)))
+    control = SimpleVehicleControl(vehicle, args)
+    control.update_target_speed(speed)
+    # What consider_obstacles' sensor would report (spawning it needs a server).
+    control._consider_obstacles = True
+    control._proximity_threshold = 30.0
+    control._obstacle_distance = obstacle_distance
+    control._obstacle_actor = _StoppedCar()
+    control._last_update = 0.01     # not 0: a falsy value restarts the clock (dt 0)
+    monkeypatch.setattr("srunner.scenariomanager.actorcontrols.simple_vehicle_control.GameTime.get_time",
+                        staticmethod(lambda: 0.05))
+    control._set_new_velocity(carla.Location(x=50.0))
+    return vehicle.velocities[-1].x
+
+
+def test_obstacle_margin_stops_the_car_that_far_before_a_stopped_car(monkeypatch):
+    assert _obstacle_step(monkeypatch, {'obstacle_margin': '2.5'}, obstacle_distance=2.4) == 0.0
+    assert _obstacle_step(monkeypatch, {'obstacle_margin': '2.5'}, obstacle_distance=2.5) == 0.0
+
+
+def test_obstacle_margin_brakes_harder_than_without(monkeypatch):
+    with_margin = _obstacle_step(monkeypatch, {'obstacle_margin': '2.5'}, obstacle_distance=6.0)
+    without = _obstacle_step(monkeypatch, None, obstacle_distance=6.0)
+    # 0.5 * 8^2 / d over the 0.04 s since the last update: d = 3.5 m vs 6 m.
+    assert with_margin == pytest.approx(8.0 - 0.04 * 0.5 * 64 / 3.5)
+    assert without == pytest.approx(8.0 - 0.04 * 0.5 * 64 / 6.0)
