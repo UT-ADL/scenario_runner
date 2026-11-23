@@ -13,7 +13,9 @@ Pinned contracts:
 - simple_vehicle_control without waypoints (free driving, e.g. an NPC waiting for its trigger) holds
   still at a dead end instead of raising IndexError, and drives on where the lane goes on.
 - simple_vehicle_control's obstacle_margin: the speed is matched that far before the obstacle (stopped
-  within it), without it at the obstacle as before.
+  within it), without it at the obstacle as before;
+- obstacle_path_width: an obstacle counts only within that XY distance of the car's remaining path (a car crossing
+  beside the path does not stop it; one on the path does); without the property every sensed obstacle counts.
 """
 
 import math
@@ -205,3 +207,47 @@ def test_obstacle_margin_brakes_harder_than_without(monkeypatch):
     # 0.5 * 8^2 / d over the 0.04 s since the last update: d = 3.5 m vs 6 m.
     assert with_margin == pytest.approx(8.0 - 0.04 * 0.5 * 64 / 3.5)
     assert without == pytest.approx(8.0 - 0.04 * 0.5 * 64 / 6.0)
+
+
+class _CrossingCar(object):
+    def __init__(self, x, y):
+        self._location = carla.Location(x=x, y=y, z=0.0)
+
+    def get_velocity(self):
+        return carla.Vector3D()
+
+    def get_location(self):
+        return self._location
+
+
+def _path_step(monkeypatch, args, obstacle):
+    vehicle = _MovingVehicle(0.0, 8.0)
+    monkeypatch.setattr(CarlaDataProvider, "get_location", staticmethod(lambda actor: actor.get_location()))
+    monkeypatch.setattr(CarlaDataProvider, "get_transform", staticmethod(lambda actor: actor.get_transform()))
+    monkeypatch.setattr(CarlaDataProvider, "get_map", staticmethod(lambda world=None: _FakeLaneMap(1000.0)))
+    control = SimpleVehicleControl(vehicle, args)
+    control.update_target_speed(8.0)
+    # The path: straight on to x=20, then a 90 deg turn left to (20, 30).
+    control._waypoints = [carla.Transform(carla.Location(x=20.0)), carla.Transform(carla.Location(x=20.0, y=30.0))]
+    control._consider_obstacles = True
+    control._proximity_threshold = 30.0
+    control._obstacle_distance = 6.0
+    control._obstacle_actor = obstacle
+    control._last_update = 0.01
+    monkeypatch.setattr("srunner.scenariomanager.actorcontrols.simple_vehicle_control.GameTime.get_time",
+                        staticmethod(lambda: 0.05))
+    control._set_new_velocity(carla.Location(x=20.0))
+    return vehicle.velocities[-1].x
+
+
+def test_obstacle_beside_the_path_does_not_stop_the_car_with_a_path_width(monkeypatch):
+    beside = _CrossingCar(6.0, -5.0)                       # 5 m to the right of the straight leg
+    assert _path_step(monkeypatch, {'obstacle_path_width': '2.5'}, beside) == pytest.approx(8.0)
+    assert _path_step(monkeypatch, None, beside) < 8.0     # stock: every sensed obstacle counts
+
+
+def test_obstacle_on_the_path_still_stops_the_car(monkeypatch):
+    on_leg = _CrossingCar(6.0, 1.0)                        # 1 m off the straight leg
+    after_turn = _CrossingCar(21.0, 15.0)                  # on the leg after the turn
+    assert _path_step(monkeypatch, {'obstacle_path_width': '2.5'}, on_leg) < 8.0
+    assert _path_step(monkeypatch, {'obstacle_path_width': '2.5'}, after_turn) < 8.0

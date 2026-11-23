@@ -54,6 +54,11 @@ class SimpleVehicleControl(BasicControl):
                                         (obstacle_margin, distance)          - Gap kept to an obstacle: the speed
                                                                                is matched this far before it
                                                                                (default 0 = at the obstacle)
+                                        (obstacle_path_width, distance)      - Only obstacles within this XY
+                                                                               distance of the actor's own path
+                                                                               (its remaining points) count
+                                                                               (default: every obstacle the sensor
+                                                                               sees, straight ahead)
                                         (waypoint_reached_threshold, distance) - Distance between actor and waypoint
                                                                                determining reached or not
                                         (consider_trafficlights, true/false) - Enable consideration of traffic lights
@@ -97,6 +102,7 @@ class SimpleVehicleControl(BasicControl):
         self._consider_obstacles = False
         self._proximity_threshold = float('inf')
         self._obstacle_margin = 0.0
+        self._obstacle_path_width = None
         self._waypoint_reached_threshold = 4.0
         self._max_deceleration = None
         self._max_acceleration = None
@@ -127,6 +133,12 @@ class SimpleVehicleControl(BasicControl):
             # asks for a gap (11-23: an NPC following a stopped ego stopped 0-0.3 m from its bumper).
             self._obstacle_margin = max(float(args['obstacle_margin']), 0.0)
 
+        if args and 'obstacle_path_width' in args:
+            # The obstacle sensor is a straight channel: it also brakes for traffic CROSSING in front, which the
+            # car's own (curving) path never meets -- 11-23 two NPC bikes stopped for the ego crossing their junction
+            # and the ego waited for them for good. VSE Play's NPC agent looks along its own route instead.
+            self._obstacle_path_width = max(float(args['obstacle_path_width']), 0.0)
+
         if args and 'consider_trafficlights' in args and strtobool(args['consider_trafficlights']):
             self._consider_traffic_lights = strtobool(args['consider_trafficlights'])
 
@@ -141,6 +153,29 @@ class SimpleVehicleControl(BasicControl):
 
         if args and 'attach_camera' in args and strtobool(args['attach_camera']):
             self._visualizer = Visualizer(self._actor)
+
+    def _obstacle_on_path(self):
+        """
+        True when the sensed obstacle counts: no obstacle_path_width set (stock), no path to compare with, or the
+        obstacle within obstacle_path_width (XY) of the actor's remaining path (from the actor through its points)
+        """
+        if self._obstacle_path_width is None or self._obstacle_actor is None or not self._waypoints:
+            return True
+        try:
+            other = CarlaDataProvider.get_location(self._obstacle_actor) or self._obstacle_actor.get_location()
+            here = CarlaDataProvider.get_location(self._actor)
+        except RuntimeError:
+            return True
+        if other is None or here is None:
+            return True
+        points = [(here.x, here.y)] + [(wp.location.x, wp.location.y) for wp in self._waypoints]
+        for (ax, ay), (bx, by) in zip(points, points[1:]):
+            dx, dy = bx - ax, by - ay
+            seg2 = dx * dx + dy * dy
+            f = 0.0 if seg2 <= 1e-9 else max(0.0, min(1.0, ((other.x - ax) * dx + (other.y - ay) * dy) / seg2))
+            if math.hypot(ax + f * dx - other.x, ay + f * dy - other.y) <= self._obstacle_path_width:
+                return True
+        return False
 
     def _on_obstacle(self, event):
         """
@@ -313,7 +348,7 @@ class SimpleVehicleControl(BasicControl):
 
         if self._consider_obstacles:
             # If distance is less than the proximity threshold, adapt velocity
-            if self._obstacle_distance < self._proximity_threshold:
+            if self._obstacle_distance < self._proximity_threshold and self._obstacle_on_path():
                 distance = max(self._obstacle_distance - self._obstacle_margin, 0)
                 if distance > 0:
                     current_speed_other = math.sqrt(
