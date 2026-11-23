@@ -13,7 +13,10 @@ Pinned contracts:
   ticks on rows of the tick grid do): no target speed above 1.5 x the path's speed;
 - a timed path on simple_vehicle_control ends within 0.5 m of its last row (it stopped up to 4 m
   short and early); an untimed path keeps the controller's reach threshold for its last point;
-  new waypoints are untimed until ChangeActorWaypoints marks them timed.
+  new waypoints are untimed until ChangeActorWaypoints marks them timed;
+- the speed uses the flat (XY) distance: vertices above or below the actor (a spawn above its first
+  point, a track's own z) ask for no extra speed; two vertices at one XY are a hold: speed 0 there,
+  the car stays put and drives on afterwards (VSE's timed tracks write a stop that way).
 """
 
 import types
@@ -79,18 +82,19 @@ def _state(monkeypatch):
     py_trees.blackboard.Blackboard().set("ActorsWithController", {}, overwrite=True)
 
 
-def _drive(rows, tick, extra=1.0):
+def _drive(rows, tick, extra=1.0, track=None, start_dy=0.0):
     """
-    Run a timed path of rows (time, x, y) on simple_vehicle_control; return the car, the target
-    speed of every tick and the action's end time.
+    Run a timed path of rows (time, x, y[, z]) on simple_vehicle_control; return the car, the target
+    speed of every tick and the action's end time (track: a list that gets (time, x) every tick).
     """
-    car = _Car(rows[0][1], rows[0][2])
+    rows = [row if len(row) == 4 else (row[0], row[1], row[2], 0.0) for row in rows]
+    car = _Car(rows[0][1], rows[0][2] + start_dy)
     control = ActorControl.__new__(ActorControl)
     control.control_instance = SimpleVehicleControl(car)
     py_trees.blackboard.Blackboard().set("ActorsWithController", {car.id: control}, overwrite=True)
-    positions = [ET.fromstring('<Position><WorldPosition x="%r" y="%r" z="0"/></Position>' % (x, y))
-                 for _, x, y in rows]
-    times = [t for t, _, _ in rows]
+    positions = [ET.fromstring('<Position><WorldPosition x="%r" y="%r" z="%r"/></Position>' % (x, y, z))
+                 for _, x, y, z in rows]
+    times = [t for t, _, _, _ in rows]
     action = ChangeActorWaypoints(car, waypoints=[(p, 'shortest') for p in positions], times=times)
 
     frame = [0]
@@ -112,6 +116,8 @@ def _drive(rows, tick, extra=1.0):
         control.run_step()
         car.move(tick)
         world_tick()
+        if track is not None:
+            track.append((GameTime.get_time(), car.location.x))
     return car, speeds, ended
 
 
@@ -182,3 +188,26 @@ def test_new_waypoints_are_untimed_until_marked():
     assert control.control_instance._timed_path is True
     control.update_waypoints([carla.Transform()])
     assert control.control_instance._timed_path is False
+
+
+@pytest.mark.parametrize("z", [0.25, 0.5, -1.09])
+def test_vertices_above_or_below_the_car_ask_for_no_extra_speed(z):
+    rows = [(t, x, y, z) for t, x, y in _straight_rows(5.0, 0.1, 6.0)]
+    car, speeds, _ended = _drive(rows, 0.05)
+    assert max(speeds) <= 5.0 * 1.5
+    assert abs(car.location.x - 30.0) <= 0.5
+
+
+@pytest.mark.parametrize("start_dy", [0.0, 0.01])
+def test_two_vertices_at_one_xy_are_a_hold(start_dy):
+    # 5 m/s to x=25 by t=5 (rows every 0.1 s), stand at x=25 until t=10 (two vertices), then on to x=50 by t=15;
+    # the car 1 cm beside the line made the old speed rule run away during the hold.
+    rows = [(round(t * 0.1, 6), t * 0.1 * 5.0, 0.0) for t in range(51)]
+    rows += [(10.0, 25.0, 0.0)]
+    rows += [(round(10.0 + t * 0.1, 6), 25.0 + t * 0.1 * 5.0, 0.0) for t in range(1, 51)]
+    track = []
+    car, speeds, _ended = _drive(rows, 0.05, track=track, start_dy=start_dy)
+    held = [x for t, x in track if 5.2 <= t <= 10.0]
+    assert held and max(abs(x - 25.0) for x in held) <= 0.5
+    assert abs(car.location.x - 50.0) <= 0.5
+    assert max(speeds) <= 5.0 * 1.5

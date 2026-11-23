@@ -913,14 +913,35 @@ class ChangeActorWaypoints(AtomicBehavior):
             if remaining_time < GameTime.get_last_step() / 2 and current_waypoint_idx + 1 < len(self._times):
                 current_waypoint_idx += 1
                 remaining_time = self._times[current_waypoint_idx] - current_relative_time
-            self._update_speed(actor, self._waypoints[current_waypoint_idx], remaining_time)
+            self._update_speed(actor, current_waypoint_idx, remaining_time)
 
         return py_trees.common.Status.RUNNING
 
-    def _update_speed(self, actor, target_waypoint, remaining_time):
-        target_location = sr_tools.openscenario_parser.OpenScenarioParser.convert_position_to_transform(
-            target_waypoint[0]).location
-        remaining_dist = calculate_distance(CarlaDataProvider.get_location(self._actor), target_location)
+    def _vertex_location(self, index):
+        """
+        The CARLA location of timed vertex index (converted once)
+        """
+        if not hasattr(self, '_vertex_locations'):
+            self._vertex_locations = {}
+        if index not in self._vertex_locations:
+            self._vertex_locations[index] = sr_tools.openscenario_parser.OpenScenarioParser.convert_position_to_transform(
+                self._waypoints[index][0]).location
+        return self._vertex_locations[index]
+
+    def _update_speed(self, actor, index, remaining_time):
+        target_location = self._vertex_location(index)
+        # A vertex at the XY of the one before is a hold (a timed track writes a stop as two
+        # vertices): stand still. Aiming at it by distance / time made any residual error grow every
+        # tick (the controller drives toward its own next point, which is always ahead).
+        if index > 0:
+            before = self._vertex_location(index - 1)
+            if math.hypot(target_location.x - before.x, target_location.y - before.y) < 0.01:
+                actor.update_target_speed(0.0)
+                return
+        # Flat (XY) distance: a vertex a little above or below the actor (a spawn above its first
+        # point, a track's own z) asked for height / time left as speed and threw the car off its path.
+        here = CarlaDataProvider.get_location(self._actor)
+        remaining_dist = math.hypot(target_location.x - here.x, target_location.y - here.y)
         # A tick landing just before a vertex time (rows on the tick grid do so through float
         # rounding) asked for the distance / ~0 s: a speed spike that threw the car off its path,
         # and every later row threw it further. The speed holds until the next tick, so the car
