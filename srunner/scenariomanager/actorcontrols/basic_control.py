@@ -46,6 +46,7 @@ class BasicControl(object):
     _offset_updated = False
     _target_speed = 0
     _reached_goal = False
+    _timed_path = False
     _init_speed = False
 
     def __init__(self, actor):
@@ -73,11 +74,19 @@ class BasicControl(object):
         """
         self._waypoints = waypoints
         self._waypoints_updated = True
+        self._timed_path = False
         # A new path is not reached yet. Without this, a second path given after the first one
         # was completed (e.g. after an idle) reported "reached" in the tick it was handed over,
         # before run_step cleared the flag, and its ChangeActorWaypoints ended at once.
         if waypoints:
             self._reached_goal = False
+
+    def set_timed_path(self):
+        """
+        Mark the current waypoints as a timed path (OpenSCENARIO Timing): its last point is due at a
+        time, so it is not reached merely by coming near it. Cleared by update_waypoints.
+        """
+        self._timed_path = True
 
     def update_offset(self, offset, start_time=None):
         """

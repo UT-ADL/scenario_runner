@@ -108,7 +108,7 @@ def test_shortest_points_never_ask_for_the_route_planner(monkeypatch):
                         staticmethod(lambda: pytest.fail("route planner asked for 'shortest' points")))
     handed = []
     actor = types.SimpleNamespace(id=3)
-    control = types.SimpleNamespace(update_waypoints=lambda route, start_time=None: handed.append(route))
+    control = types.SimpleNamespace(update_waypoints=lambda route, start_time=None, timed=False: handed.append(route))
     py_trees.blackboard.Blackboard().set("ActorsWithController", {actor.id: control}, overwrite=True)
     try:
         positions = [ET.fromstring('<Position><WorldPosition x="%d" y="0" z="0"/></Position>' % x)

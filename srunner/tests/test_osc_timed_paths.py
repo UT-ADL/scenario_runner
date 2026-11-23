@@ -10,7 +10,10 @@ ChangeActorWaypoints and simple_vehicle_control, simulated in float time.
 Pinned contracts:
 - GameTime keeps the game time its last tick added;
 - a timed path asks for no speed spike when a tick lands just before a vertex time (exact double
-  ticks on rows of the tick grid do): no target speed above 1.5 x the path's speed.
+  ticks on rows of the tick grid do): no target speed above 1.5 x the path's speed;
+- a timed path on simple_vehicle_control ends within 0.5 m of its last row (it stopped up to 4 m
+  short and early); an untimed path keeps the controller's reach threshold for its last point;
+  new waypoints are untimed until ChangeActorWaypoints marks them timed.
 """
 
 import types
@@ -140,3 +143,42 @@ def test_timed_path_speed_has_no_spikes(speed, row_seconds):
     _, speeds, _ = _drive(rows, 0.05)
     assert max(speeds) <= 1.5 * speed
     assert min(speeds[1:-1]) >= 0.5 * speed
+
+
+@pytest.mark.parametrize("row_seconds", [0.05, 0.5, 1.0])
+@pytest.mark.parametrize("speed", [2.0, 10.0])
+def test_timed_path_ends_on_its_last_row(speed, row_seconds):
+    rows = _straight_rows(speed, row_seconds, 6.0)
+    car, _, ended = _drive(rows, 0.05, extra=2.0)
+    assert abs(car.location.x - rows[-1][1]) < 0.5  # was up to 3.8 m short, 1.8 s early
+    assert ended >= rows[-1][0] - 0.5 / speed
+    assert (car.velocity.x, car.velocity.y) == (0.0, 0.0)
+
+
+def test_untimed_last_point_keeps_the_reach_threshold():
+    car = _Car(0.0, 0.0)
+    control = SimpleVehicleControl(car)
+    control.update_target_speed(5.0)
+    control.update_waypoints([carla.Transform(carla.Location(x=3.0, y=0.0, z=0.0))])
+    control.run_step()
+    assert control.check_reached_waypoint_goal() is True  # within 4 m, as before
+
+
+def test_timed_last_point_is_reached_only_on_it():
+    car = _Car(0.0, 0.0)
+    control = SimpleVehicleControl(car)
+    control.update_target_speed(5.0)
+    control.update_waypoints([carla.Transform(carla.Location(x=3.0, y=0.0, z=0.0))])
+    control.set_timed_path()
+    control.run_step()
+    assert control.check_reached_waypoint_goal() is False
+    assert car.velocity.x == pytest.approx(5.0)
+
+
+def test_new_waypoints_are_untimed_until_marked():
+    control = ActorControl.__new__(ActorControl)
+    control.control_instance = SimpleVehicleControl(_Car(0.0, 0.0))
+    control.update_waypoints([carla.Transform()], timed=True)
+    assert control.control_instance._timed_path is True
+    control.update_waypoints([carla.Transform()])
+    assert control.control_instance._timed_path is False

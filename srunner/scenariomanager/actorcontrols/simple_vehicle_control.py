@@ -222,9 +222,18 @@ class SimpleVehicleControl(BasicControl):
             self._reached_goal = False
             if not self._waypoints:
                 self._reached_goal = True
+                if self._timed_path:
+                    # On the last point of a timed path: stop there, not one tick past it.
+                    self._actor.set_target_velocity(carla.Vector3D(0, 0, 0))
             else:
                 direction_norm = self._set_new_velocity(self._offset_waypoint(self._waypoints[0]))
-                if direction_norm < self._waypoint_reached_threshold:
+                reached_threshold = self._waypoint_reached_threshold
+                if self._timed_path and len(self._waypoints) == 1:
+                    # The last point of a timed path is due at its time: dropped at the reach
+                    # threshold (4 m) it stopped the vehicle that far short and early, as much as
+                    # 1.8 s on a 2 m/s path. The path's speed brings the vehicle there on time.
+                    reached_threshold = min(reached_threshold, 0.5)
+                if direction_norm < reached_threshold:
                     self._waypoints = self._waypoints[1:]
                     if not self._waypoints:
                         self._reached_goal = True

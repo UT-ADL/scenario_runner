@@ -106,15 +106,18 @@ class ActorControl(object):
         if start_time:
             self._last_longitudinal_command = start_time
 
-    def update_waypoints(self, waypoints, start_time=None):
+    def update_waypoints(self, waypoints, start_time=None, timed=False):
         """
         Update the actor's waypoints
 
         Args:
             waypoints (List of carla.Transform): List of new waypoints.
             start_time (float): Start time of the new "maneuver" [s].
+            timed (bool): The waypoints are a timed path (OpenSCENARIO Timing).
         """
         self.control_instance.update_waypoints(waypoints)
+        if timed:
+            self.control_instance.set_timed_path()
         if start_time:
             self._last_waypoint_command = start_time
 

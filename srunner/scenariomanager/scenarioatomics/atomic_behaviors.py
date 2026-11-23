@@ -841,7 +841,8 @@ class ChangeActorWaypoints(AtomicBehavior):
                     elif not route:
                         route.append(wp_tuple[0].transform)
 
-        actor_dict[self._actor.id].update_waypoints(route, start_time=self._start_time)
+        actor_dict[self._actor.id].update_waypoints(route, start_time=self._start_time,
+                                                    timed=self._times is not None)
 
         super(ChangeActorWaypoints, self).initialise()
 
