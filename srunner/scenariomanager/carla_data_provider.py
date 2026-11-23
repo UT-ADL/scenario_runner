@@ -228,7 +228,9 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         CarlaDataProvider._sync_flag = world.get_settings().synchronous_mode
         CarlaDataProvider._map = world.get_map()
         CarlaDataProvider._blueprint_library = world.get_blueprint_library()
-        CarlaDataProvider._grp = GlobalRoutePlanner(CarlaDataProvider._map, 2.0)
+        # Built on first use (get_global_route_planner): on a large road file it takes long, and a
+        # run calls set_world twice; a scenario of 'shortest' paths never needs it.
+        CarlaDataProvider._grp = None
         CarlaDataProvider.generate_spawn_points()
         CarlaDataProvider.prepare_map()
 
@@ -266,8 +268,11 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
     @staticmethod
     def get_global_route_planner():
         """
-        @return the global route planner
+        @return the global route planner of the world's map (built on the first call after set_world;
+        None before set_world)
         """
+        if CarlaDataProvider._grp is None and CarlaDataProvider._world is not None:
+            CarlaDataProvider._grp = GlobalRoutePlanner(CarlaDataProvider.get_map(), 2.0)
         return CarlaDataProvider._grp
 
     @staticmethod

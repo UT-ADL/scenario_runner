@@ -796,12 +796,15 @@ class ChangeActorWaypoints(AtomicBehavior):
 
         # Obtain final route, considering the routing option
         # At the moment everything besides "shortest" will use the CARLA GlobalPlanner
-        grp = CarlaDataProvider.get_global_route_planner()
+        # (fetched only then: it is built on first use, which takes long on a large map)
+        grp = None
         route = []
         for i, element in enumerate(carla_route_elements):
             if element[1] == "shortest":
                 route.append(element[0])
             else:
+                if grp is None:
+                    grp = CarlaDataProvider.get_global_route_planner()
                 if i == 0:
                     mmap = CarlaDataProvider.get_map()
                     ego_location = CarlaDataProvider.get_location(self._actor)

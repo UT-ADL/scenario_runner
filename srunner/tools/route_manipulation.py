@@ -84,6 +84,43 @@ def _get_latlon_ref(world):
     return lat_ref, lon_ref
 
 
+def _get_header_latlon_ref(world):
+    """
+    Return what _get_latlon_ref(world) returns, parsing the OpenDRIVE text only up to the end of
+    its header (OpenDRIVE has one header, the first element; its geoReference is read the same way)
+
+    _get_latlon_ref parses the whole text: seconds and gigabytes for a large road file (77 MB+).
+    :return: tuple with lat and lon coordinates
+    """
+    xodr = world.get_map().to_opendrive()
+
+    # default reference
+    lat_ref = 42.0
+    lon_ref = 2.0
+
+    parser = ET.XMLPullParser(events=("start", "end"))
+    path = []  # tags of the open elements, root first
+    chunk = 1 << 16
+    for offset in range(0, len(xodr), chunk):
+        parser.feed(xodr[offset:offset + chunk])
+        for event, element in parser.read_events():
+            if event == "start":
+                path.append(element.tag)
+                continue
+            path.pop()
+            in_header = "OpenDRIVE" in path and "header" in path[path.index("OpenDRIVE") + 1:]
+            if element.tag == "geoReference" and in_header and element.text:
+                str_list = element.text.split(' ')
+                for item in str_list:
+                    if '+lat_0' in item:
+                        lat_ref = float(item.split('=')[1])
+                    if '+lon_0' in item:
+                        lon_ref = float(item.split('=')[1])
+            elif element.tag == "header" and "OpenDRIVE" in path:
+                return lat_ref, lon_ref
+    return lat_ref, lon_ref
+
+
 def downsample_route(route, sample_factor):
     """
     Downsample the route by some factor.

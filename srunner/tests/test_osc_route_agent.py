@@ -147,7 +147,7 @@ def _runner_with_agent(monkeypatch):
     runner.ego_vehicles = []
     runner.world = None
     runner.agent_instance = None
-    monkeypatch.setattr(sr, "_get_latlon_ref", lambda world: (58.0, 26.0))
+    monkeypatch.setattr(sr, "_get_header_latlon_ref", lambda world: (58.0, 26.0))
     return runner
 
 

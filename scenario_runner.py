@@ -54,7 +54,7 @@ from srunner.tools.scenario_parser import ScenarioConfigurationParser
 from srunner.tools.route_parser import RouteParser
 from srunner.tools.osc2_helper import OSC2Helper
 from srunner.tools.openscenario_parser import OpenScenarioParser
-from srunner.tools.route_manipulation import _get_latlon_ref, location_route_to_gps
+from srunner.tools.route_manipulation import _get_header_latlon_ref, location_route_to_gps
 from agents.navigation.local_planner import RoadOption
 from srunner.scenarios.osc2_scenario import OSC2Scenario
 from srunner.scenarioconfigs.osc2_scenario_configuration import OSC2ScenarioConfiguration
@@ -360,6 +360,11 @@ class ScenarioRunner(object):
 
         CarlaDataProvider.set_client(self.client)
         CarlaDataProvider.set_world(self.world)
+        if not OpenScenarioParser.standard_semantics:
+            # The route planner is built on first use. Build it here, before the run, as set_world
+            # always did, so a route action of an old file (town LogicFile, route mode) never waits
+            # for it mid-run; a standard file (.xodr LogicFile) builds it only if it routes at all.
+            CarlaDataProvider.get_global_route_planner()
 
         # Wait for the world to be ready
         if CarlaDataProvider.is_sync_mode():
@@ -507,7 +512,7 @@ class ScenarioRunner(object):
         # never applies this agent's control, and carla_minimal_agent reads only the transforms.
         options = (RoadOption.LANEFOLLOW, RoadOption.STRAIGHT)
         route = [(transform, options[i % 2]) for i, transform in enumerate(transforms)]
-        lat_ref, lon_ref = _get_latlon_ref(self.world)
+        lat_ref, lon_ref = _get_header_latlon_ref(self.world)  # the agent's GPS plan, as in route mode
         agent.set_global_plan(location_route_to_gps(route, lat_ref, lon_ref), route)
         goal = transforms[-1].location
         print("--agent {}: the route of {} ({} points, goal at CARLA ({:.1f}, {:.1f})) is "
