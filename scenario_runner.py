@@ -500,7 +500,13 @@ class ScenarioRunner(object):
         agent_class_name = self.module_agent.__name__.title().replace('_', '')
         agent = getattr(self.module_agent, agent_class_name)(self._args.agentConfig)
         self.agent_instance = agent  # destroyed by _cleanup
-        route = [(transform, RoadOption.LANEFOLLOW) for transform in transforms]
+        # The options alternate so that every point survives the agent's downsample_route (made
+        # for 1 m dense routes: it keeps a point where the option changes, but drops the point
+        # after a kept one and every second one after that, e.g. [0, 60, 120] m -> [0, 120] m:
+        # the drawn via-points that chose the turns). Nobody drives by them here: the manager
+        # never applies this agent's control, and carla_minimal_agent reads only the transforms.
+        options = (RoadOption.LANEFOLLOW, RoadOption.STRAIGHT)
+        route = [(transform, options[i % 2]) for i, transform in enumerate(transforms)]
         lat_ref, lon_ref = _get_latlon_ref(self.world)
         agent.set_global_plan(location_route_to_gps(route, lat_ref, lon_ref), route)
         goal = transforms[-1].location

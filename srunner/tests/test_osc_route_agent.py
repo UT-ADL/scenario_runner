@@ -12,6 +12,8 @@ Pinned contracts:
 - the ego's path is its first FollowTrajectoryAction / AssignRouteAction (Init first, then the
   stories), e.g. VSE's ego_vehicleTrajectoryAction;
 - the agent gets that path in CARLA's frame as its global plan; no path = no agent;
+- every point of that plan survives the real downsample_route that Autoware Mini's
+  carla_minimal_agent runs on it (its downsampling_interval, 2-5 points, near and far apart);
 - the manager runs a route agent's run_step every tick and never applies its control.
 """
 
@@ -26,6 +28,7 @@ import pytest
 import scenario_runner as sr
 from srunner.scenariomanager.scenario_manager import ScenarioManager
 from srunner.tools.openscenario_parser import OpenScenarioParser
+from srunner.tools.route_manipulation import downsample_route
 
 
 def _args(**kwargs):
@@ -163,6 +166,31 @@ def test_ego_path_is_handed_to_the_agent_in_carla_frame(monkeypatch, capsys):
     assert points == [(10.0, -5.0, -0.0), (30.0, -5.0, -90.0), (30.0, -25.0, -90.0)]
     assert len(gps) == 3 and set(gps[0][0]) == {"lat", "lon", "z"}
     assert "3 points, goal at CARLA (30.0, -25.0)" in capsys.readouterr().out
+
+
+def _storyboard_with_ego_path(points):
+    storyboard = ET.fromstring(_STORYBOARD)
+    polyline = storyboard.find(".//Trajectory[@name='ego_vehicleTrajectory']/Shape/Polyline")
+    for vertex in list(polyline):
+        polyline.remove(vertex)
+    for i, (x, y) in enumerate(points):
+        polyline.append(ET.fromstring(
+            '<Vertex time="%d"><Position><WorldPosition x="%r" y="%r" z="0.5" h="0"/></Position></Vertex>'
+            % (i, x, y)))
+    return ET.tostring(storyboard, encoding="unicode")
+
+
+@pytest.mark.parametrize("count", [2, 3, 4, 5, 9])
+@pytest.mark.parametrize("spacing", [0.3, 60.0])
+@pytest.mark.parametrize("interval", [0, 42, 1000])  # Autoware Mini's carla.yaml: 42
+def test_every_point_survives_the_agents_downsampling(monkeypatch, count, spacing, interval):
+    runner = _runner_with_agent(monkeypatch)
+    points = [(10.0 + i * spacing, 5.0 + (i % 2) * spacing) for i in range(count)]
+    agent = runner._setup_route_agent(_config(_storyboard_with_ego_path(points)))
+    _, route = agent.plan
+    kept = downsample_route(route, interval)  # what carla_minimal_agent.set_global_plan keeps
+    assert kept == list(range(count))
+    assert [(round(t.location.x, 3), round(-t.location.y, 3)) for t, _ in route] == points
 
 
 def test_no_ego_path_no_agent(monkeypatch, capsys):
