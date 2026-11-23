@@ -8,7 +8,8 @@ Unit tests (pytest, no CARLA server) for reading standard OpenSCENARIO files suc
 
 Pinned contracts:
 - a LogicFile that is a road file of the loaded map plays on the loaded map (nothing is loaded or
-  generated, the file need not exist); other LogicFiles keep the old path;
+  generated, the file need not exist); other LogicFiles keep the old path, except that under an
+  outside ego (--waitForEgo) a road file of another map raises instead of generating a world;
 - standard_semantics is on for a road-file (.xodr) LogicFile and off for a CARLA town name; with it
   TimeReference None gives an untimed path and a condition's delay runs after the condition holds,
   without it both keep ScenarioRunner's old reading;
@@ -20,6 +21,7 @@ Pinned contracts:
   skipped.
 """
 
+import argparse
 import xml.etree.ElementTree as ET
 
 import carla
@@ -86,6 +88,9 @@ class _FakeWorld(object):
     def get_settings(self):
         return carla.WorldSettings()
 
+    def wait_for_tick(self):
+        pass
+
 
 class _FakeClient(object):
     def __init__(self, name):
@@ -104,8 +109,9 @@ class _FakeClient(object):
         raise RuntimeError("test: generate_opendrive_world")
 
 
-def _town_config(tmp_path, logic_file, loaded):
+def _town_config(tmp_path, logic_file, loaded, wait_for_ego=False):
     cfg = OpenScenarioConfiguration.__new__(OpenScenarioConfiguration)
+    cfg._wait_for_ego = wait_for_ego
     cfg.xml_tree = ET.ElementTree(ET.fromstring(
         '<OpenSCENARIO><RoadNetwork><LogicFile filepath="%s"/></RoadNetwork></OpenSCENARIO>'
         % logic_file))
@@ -134,6 +140,67 @@ def test_road_file_of_another_map_keeps_the_old_path(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         cfg._set_carla_town()
     assert cfg.client.calls == ["generate_opendrive_world"]
+
+
+def test_road_file_of_another_map_is_refused_under_an_outside_ego(tmp_path, monkeypatch):
+    monkeypatch.setattr(CarlaDataProvider, "set_world", staticmethod(lambda world: None))
+    (tmp_path / "tartu_large.xodr").write_text("<OpenDRIVE>file</OpenDRIVE>")
+    cfg = _town_config(tmp_path, "tartu_large.xodr", "tartu_demo", wait_for_ego=True)
+    with pytest.raises(RuntimeError, match="LogicFile tartu_large.xodr is not a road file of the loaded map "
+                                           "tartu_demo"):
+        cfg._set_carla_town()
+    assert cfg.client.calls == []
+
+
+def test_missing_road_file_of_another_map_names_the_loaded_map_under_an_outside_ego(tmp_path, monkeypatch):
+    monkeypatch.setattr(CarlaDataProvider, "set_world", staticmethod(lambda world: None))
+    cfg = _town_config(tmp_path, "tartu_large.xodr", "tartu_demo", wait_for_ego=True)  # no file on disk
+    with pytest.raises(RuntimeError, match="loaded map tartu_demo"):
+        cfg._set_carla_town()
+    assert cfg.client.calls == []
+
+
+def test_missing_road_file_keeps_the_old_error_without_an_outside_ego(tmp_path, monkeypatch):
+    monkeypatch.setattr(CarlaDataProvider, "set_world", staticmethod(lambda world: None))
+    cfg = _town_config(tmp_path, "tartu_large.xodr", "tartu_demo")
+    with pytest.raises(AttributeError, match="does not exist"):
+        cfg._set_carla_town()
+
+
+def test_road_file_with_the_loaded_roads_still_plays_under_an_outside_ego(tmp_path, monkeypatch):
+    worlds = []
+    monkeypatch.setattr(CarlaDataProvider, "set_world", staticmethod(worlds.append))
+    (tmp_path / "renamed.xodr").write_text("<?xml version='1.0'?><OpenDRIVE>loaded</OpenDRIVE>")
+    cfg = _town_config(tmp_path, "renamed.xodr", "OpenDriveMap", wait_for_ego=True)
+    cfg._set_carla_town()  # same roads as the loaded map: nothing to generate, as before
+    assert cfg.client.calls == []
+    assert worlds == [cfg.client.world]
+
+
+def test_runner_tells_the_configuration_about_an_outside_ego(tmp_path, monkeypatch):
+    import scenario_runner as sr
+
+    made = []
+    monkeypatch.setattr(sr, "OpenScenarioConfiguration",
+                        lambda *args, **kwargs: made.append(kwargs.get("wait_for_ego")) or "config")
+    runner = sr.ScenarioRunner.__new__(sr.ScenarioRunner)
+    scene = tmp_path / "scene.xosc"
+    scene.write_text("<OpenSCENARIO/>")
+    for wait in (True, False):
+        runner._args = argparse.Namespace(openscenario=str(scene), openscenarioparams=None, waitForEgo=wait)
+        runner.client = None
+        runner._load_and_run_scenario = lambda config: True
+        runner._cleanup = lambda: None
+        assert runner._run_openscenario() is True
+    assert made == [True, False]
+
+
+def test_town_name_still_loads_under_an_outside_ego(tmp_path, monkeypatch):
+    monkeypatch.setattr(CarlaDataProvider, "set_world", staticmethod(lambda world: None))
+    cfg = _town_config(tmp_path, "Town02", "Town01", wait_for_ego=True)
+    with pytest.raises(RuntimeError, match="test: load_world"):
+        cfg._set_carla_town()
+    assert cfg.client.calls == ["load_world"]
 
 
 def test_town_name_keeps_old_semantics(tmp_path, monkeypatch):

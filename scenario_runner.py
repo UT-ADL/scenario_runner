@@ -569,7 +569,8 @@ class ScenarioRunner(object):
             for entry in self._args.openscenarioparams.split(','):
                 [key, val] = [m.strip() for m in entry.split(':')]
                 openscenario_params[key] = val
-        config = OpenScenarioConfiguration(self._args.openscenario, self.client, openscenario_params)
+        config = OpenScenarioConfiguration(self._args.openscenario, self.client, openscenario_params,
+                                           wait_for_ego=self._args.waitForEgo)
 
         result = self._load_and_run_scenario(config)
         self._cleanup()

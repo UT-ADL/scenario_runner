@@ -56,7 +56,7 @@ class OpenScenarioConfiguration(ScenarioConfiguration):
     - Only one Story + Init is supported per Storyboard
     """
 
-    def __init__(self, filename, client, custom_params):
+    def __init__(self, filename, client, custom_params, wait_for_ego=False):
 
         super(OpenScenarioConfiguration, self).__init__()
 
@@ -66,6 +66,7 @@ class OpenScenarioConfiguration(ScenarioConfiguration):
 
         self._validate_openscenario_configuration()
         self.client = client
+        self._wait_for_ego = wait_for_ego  # --waitForEgo: never replace the world under an outside ego
 
         self.catalogs = {}
 
@@ -199,6 +200,9 @@ class OpenScenarioConfiguration(ScenarioConfiguration):
             if not os.path.isabs(self.town):
                 self.town = os.path.dirname(os.path.abspath(self.filename)) + "/" + self.town
             if not os.path.exists(self.town):
+                world = self.client.get_world() if self._wait_for_ego else None
+                if world is not None:
+                    self._refuse_world_change(world.get_map())
                 raise AttributeError("The provided RoadNetwork '{}' does not exist".format(self.town))
 
         # workaround for relative positions during init
@@ -222,6 +226,8 @@ class OpenScenarioConfiguration(ScenarioConfiguration):
                     old_map = old_map[index:]
 
                 if data != old_map:
+                    if self._wait_for_ego and wmap is not None:
+                        self._refuse_world_change(wmap)
                     self.logger.warning(" Wrong OpenDRIVE map in use. Forcing reload of CARLA world")
 
                     vertex_distance = 2.0  # in meters
@@ -273,6 +279,19 @@ class OpenScenarioConfiguration(ScenarioConfiguration):
         self.town = loaded
         CarlaDataProvider.set_world(world)
         return True
+
+    def _refuse_world_change(self, wmap):
+        """
+        Raise instead of generating a world from the road file under an outside ego (--waitForEgo)
+
+        A new world removes every actor, the outside ego (e.g. Autoware Mini's) included, and leaves
+        its stack on the old map. Called only for a road-file LogicFile that is not the loaded map's.
+        """
+        loaded = wmap.name.split('/')[-1]
+        raise RuntimeError(
+            "OpenSCENARIO: the LogicFile {} is not a road file of the loaded map {}. With --waitForEgo "
+            "no world is generated or loaded (it would remove the outside ego): start the outside "
+            "stack on the file's map, or use a file made for {}.".format(os.path.basename(self.town), loaded, loaded))
 
     def _set_parameters(self):
         """
