@@ -193,7 +193,7 @@ class SimpleVehicleControl(BasicControl):
                 map_wp = CarlaDataProvider.get_map().get_waypoint(CarlaDataProvider.get_location(self._actor))
             else:
                 map_wp = CarlaDataProvider.get_map().get_waypoint(self._generated_waypoint_list[-1].location)
-            while len(self._generated_waypoint_list) < 50:
+            while map_wp is not None and len(self._generated_waypoint_list) < 50:
                 map_wps = map_wp.next(2.0)
                 if map_wps:
                     self._generated_waypoint_list.append(map_wps[0].transform)
@@ -205,6 +205,15 @@ class SimpleVehicleControl(BasicControl):
             while (self._generated_waypoint_list and
                    self._generated_waypoint_list[0].location.distance(self._actor.get_location()) < 0.5):
                 self._generated_waypoint_list = self._generated_waypoint_list[1:]
+
+            if not self._generated_waypoint_list:
+                # A dead end (the lane has no successor) or no road: nowhere to drive, so hold
+                # still. Indexing the empty list raised IndexError and ended the whole run (e.g. an
+                # NPC parked at a lane end while it waits for its trigger).
+                self._actor.set_target_velocity(carla.Vector3D(0, 0, 0))
+                self._actor.set_target_angular_velocity(carla.Vector3D(0, 0, 0))
+                self._last_update = GameTime.get_time()
+                return
 
             direction_norm = self._set_new_velocity(self._offset_waypoint(self._generated_waypoint_list[0]))
             if direction_norm < 2.0:
