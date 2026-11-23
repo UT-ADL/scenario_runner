@@ -664,6 +664,45 @@ class OpenScenarioParser(object):
         return waypoints, times
 
     @staticmethod
+    def get_actor_path(storyboard, actor_name, catalogs):
+        """
+        Return the Position elements of the actor's first path, or [] when it has none.
+
+        The path is the first FollowTrajectoryAction (Polyline vertices) or AssignRouteAction
+        (route waypoints) acting on the actor: its Init first, then the stories in file order.
+        VSE writes the ego's as action ego_vehicleTrajectoryAction in event ego_vehicleRoute.
+        """
+        def path_of(routing_action):
+            if routing_action.find('FollowTrajectoryAction') is not None:
+                waypoints, _ = OpenScenarioParser.get_trajectory(
+                    routing_action.find('FollowTrajectoryAction'), catalogs)
+                return list(waypoints)
+            if routing_action.find('AssignRouteAction') is not None:
+                return [position for position, _ in OpenScenarioParser.get_route(
+                    routing_action.find('AssignRouteAction'), catalogs)]
+            return []
+
+        init = storyboard.find('Init')
+        if init is not None:
+            for private in init.iter('Private'):
+                if private.attrib.get('entityRef', None) == actor_name:
+                    for routing_action in private.iter('RoutingAction'):
+                        path = path_of(routing_action)
+                        if path:
+                            return path
+
+        for group in storyboard.iter('ManeuverGroup'):
+            names = [entity.attrib.get('entityRef', None)
+                     for actors in group.iter('Actors') for entity in actors.iter('EntityRef')]
+            if actor_name not in names:
+                continue
+            for routing_action in group.iter('RoutingAction'):
+                path = path_of(routing_action)
+                if path:
+                    return path
+        return []
+
+    @staticmethod
     def convert_position_to_transform(position, actor_list=None):
         """
         Convert an OpenScenario position into a CARLA transform

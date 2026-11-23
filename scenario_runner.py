@@ -53,11 +53,18 @@ from srunner.scenarios.route_scenario import RouteScenario
 from srunner.tools.scenario_parser import ScenarioConfigurationParser
 from srunner.tools.route_parser import RouteParser
 from srunner.tools.osc2_helper import OSC2Helper
+from srunner.tools.openscenario_parser import OpenScenarioParser
+from srunner.tools.route_manipulation import _get_latlon_ref, location_route_to_gps
+from agents.navigation.local_planner import RoadOption
 from srunner.scenarios.osc2_scenario import OSC2Scenario
 from srunner.scenarioconfigs.osc2_scenario_configuration import OSC2ScenarioConfiguration
 
 # Minimum version of CARLA that is required
 MIN_CARLA_VERSION = '0.9.14'
+
+# Agent for --openscenario --waitForEgo when no --agent is given (Autoware Mini's OpenSCENARIO
+# mode: the CARLA ROS bridge starts scenario_runner.py without --agent but with its environment)
+OSC_AGENT_ENV = 'VSE_XOSC_AGENT'
 
 
 class ScenarioRunner(object):
@@ -377,7 +384,7 @@ class ScenarioRunner(object):
             self._cleanup()
             return False
 
-        if self._args.agent:
+        if self._args.agent and not self._args.openscenario:
             agent_class_name = self.module_agent.__name__.title().replace('_', '')
             try:
                 self.agent_instance = getattr(self.module_agent, agent_class_name)(self._args.agentConfig)
@@ -429,6 +436,16 @@ class ScenarioRunner(object):
             self._cleanup()
             return False
 
+        route_agent = None
+        if self._args.openscenario and self._args.agent:
+            try:
+                route_agent = self._setup_route_agent(config)
+            except Exception as e:          # pylint: disable=broad-except
+                traceback.print_exc()
+                print("Could not setup required agent due to {}".format(e))
+                self._cleanup()
+                return False
+
         try:
             if self._args.record:
                 recorder_name = "{}/{}/{}.log".format(
@@ -436,7 +453,8 @@ class ScenarioRunner(object):
                 self.client.start_recorder(recorder_name, True)
 
             # Load scenario and run it
-            self.manager.load_scenario(scenario, self.agent_instance)
+            self.manager.load_scenario(scenario, None if route_agent else self.agent_instance,
+                                       route_agent=route_agent)
             self.manager.run_scenario()
 
             # Provide outputs if required
@@ -457,6 +475,38 @@ class ScenarioRunner(object):
 
         self._cleanup()
         return result
+
+    def _setup_route_agent(self, config):
+        """
+        Hand the ego's path of an OpenSCENARIO file to the --agent; return the agent or None.
+
+        For an outside ego (--waitForEgo, e.g. Autoware Mini): the agent gets the path as its
+        global plan (CARLA frame, the points as written, no lane routing -- Autoware Mini's
+        planner routes on its own map) and publishes it from run_step (carla_minimal_agent:
+        /initialpose at the first point, the route, the goal at the last). It never drives:
+        the manager does not apply its control and does not tick the world for it.
+        """
+        if not config.ego_vehicles:
+            print("--agent: the file has no ego vehicle, no route is handed over")
+            return None
+        rolename = config.ego_vehicles[0].rolename
+        positions = OpenScenarioParser.get_actor_path(config.storyboard, rolename, config.catalogs)
+        transforms = [OpenScenarioParser.convert_position_to_transform(position) for position in positions]
+        transforms = [t for t in transforms if t is not None]
+        if len(transforms) < 2:
+            print("--agent: {} has no path in the file, no route is handed over".format(rolename))
+            return None
+
+        agent_class_name = self.module_agent.__name__.title().replace('_', '')
+        agent = getattr(self.module_agent, agent_class_name)(self._args.agentConfig)
+        self.agent_instance = agent  # destroyed by _cleanup
+        route = [(transform, RoadOption.LANEFOLLOW) for transform in transforms]
+        lat_ref, lon_ref = _get_latlon_ref(self.world)
+        agent.set_global_plan(location_route_to_gps(route, lat_ref, lon_ref), route)
+        goal = transforms[-1].location
+        print("--agent {}: the route of {} ({} points, goal at CARLA ({:.1f}, {:.1f})) is "
+              "handed over".format(agent_class_name, rolename, len(route), goal.x, goal.y))
+        return agent
 
     def _run_scenarios(self):
         """
@@ -555,6 +605,27 @@ class ScenarioRunner(object):
         return result
 
 
+def resolve_agent_arguments(arguments, environ):
+    """
+    Settle --agent; False when it cannot be used with the other arguments.
+
+    Route mode: the agent drives the ego, the world runs synchronously (--sync).
+    OpenSCENARIO with --waitForEgo: the agent only publishes the ego's path of the file; without
+    --agent the file named by $VSE_XOSC_AGENT is used (the CARLA ROS bridge's scenario runner node
+    passes its environment but no --agent). --sync is left as given: the outside stack ticks.
+    """
+    if arguments.openscenario and arguments.waitForEgo and not arguments.agent and environ.get(OSC_AGENT_ENV):
+        arguments.agent = os.path.expanduser(environ[OSC_AGENT_ENV])
+        print("Agent from ${}: {}".format(OSC_AGENT_ENV, arguments.agent))
+    if not arguments.agent:
+        return True
+    if arguments.scenario or (arguments.openscenario and not arguments.waitForEgo):
+        return False
+    if not arguments.openscenario:
+        arguments.sync = True
+    return True
+
+
 def main():
     """
     main function
@@ -590,7 +661,9 @@ def main():
     parser.add_argument('--route', help='Run a route as a scenario', type=str)
     parser.add_argument('--route-id', help='Run a specific route inside that \'route\' file', default='', type=str)
     parser.add_argument(
-        '--agent', help="Agent used to execute the route. Not compatible with non-route-based scenarios.")
+        '--agent', help="Agent used to execute the route (route mode). With --openscenario and --waitForEgo:\n"
+                        "an agent that only publishes the ego's path of the file (e.g. Autoware Mini's\n"
+                        "carla_minimal_agent.py); default there: the file named by $" + OSC_AGENT_ENV + ".")
     parser.add_argument('--agentConfig', type=str, help="Path to Agent's configuration file", default="")
 
     parser.add_argument('--output', action="store_true", help='Provide results on stdout')
@@ -631,8 +704,8 @@ def main():
         parser.print_help(sys.stdout)
         return 1
 
-    if arguments.agent and (arguments.openscenario or arguments.scenario):
-        print("Agents are currently only compatible with route scenarios'\n\n")
+    if not resolve_agent_arguments(arguments, os.environ):
+        print("Agents are currently only compatible with route scenarios and with OpenSCENARIO and --waitForEgo'\n\n")
         parser.print_help(sys.stdout)
         return 1
 
@@ -641,9 +714,6 @@ def main():
 
     if arguments.route:
         arguments.reloadWorld = True
-
-    if arguments.agent:
-        arguments.sync = True
 
     scenario_runner = None
     result = True

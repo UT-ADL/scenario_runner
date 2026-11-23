@@ -53,6 +53,7 @@ class ScenarioManager(object):
 
         self._debug_mode = debug_mode
         self._agent = None
+        self._route_agent = None
         self._sync_mode = sync_mode
         self._watchdog = None
         self._timeout = timeout
@@ -91,15 +92,22 @@ class ScenarioManager(object):
         if self._agent is not None:
             self._agent.cleanup()
             self._agent = None
+        self._route_agent = None
 
         CarlaDataProvider.cleanup()
 
-    def load_scenario(self, scenario, agent=None):
+    def load_scenario(self, scenario, agent=None, route_agent=None):
         """
         Load a new scenario
+
+        agent drives the ego (route mode: the manager ticks the world and applies its control).
+        route_agent only publishes the ego's route (OpenSCENARIO with an outside ego, e.g.
+        Autoware Mini's carla_minimal_agent): its run_step runs every tick without sensor data,
+        its control is not applied and the manager does not tick the world for it.
         """
         self._reset()
         self._agent = AgentWrapper(agent) if agent else None
+        self._route_agent = route_agent
         if self._agent is not None:
             self._sync_mode = True
         self.scenario = scenario
@@ -167,6 +175,9 @@ class ScenarioManager(object):
 
             if self._agent is not None:
                 ego_action = self._agent()  # pylint: disable=not-callable
+
+            if self._route_agent is not None:
+                self._route_agent.run_step({}, GameTime.get_time())
 
             if self._agent is not None:
                 self.ego_vehicles[0].apply_control(ego_action)
