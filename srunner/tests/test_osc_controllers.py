@@ -707,3 +707,26 @@ def test_without_comfort_properties_the_commands_are_as_before(provider, stock_l
     # The same runs on the controller of 0ceb118 (before comfort_* and the box distance).
     assert len(log) == count
     assert hashlib.sha256(text.encode()).hexdigest() == digest
+
+
+def test_comfort_deceleration_brakes_onto_the_last_point_instead_of_stopping_dead(provider):
+    # Allan 2026-11-24 (the Tartu lap): stock drops the last point 4 m short and stops dead from full speed there, so
+    # a car following it had to stop at once; with comfort_deceleration the car brakes onto the point.
+    def script(i, control):
+        control._obstacle_actor, control._obstacle_distance = None, 100.0
+
+    def run(args):
+        car = _ScriptedCar(keep=1.0, speed=13.0)
+        _drive_ticks(args, script, 400, car, 13.0, [carla.Transform(carla.Location(x=60.0))])
+        return car
+
+    stock = run({'obstacle_margin': '2.5'})
+    moving = [s for s in stock.speeds if s > 0.0]
+    assert max(moving) == pytest.approx(13.0) and min(moving) == pytest.approx(13.0)     # 13 m/s to the stop, then 0
+    assert stock.location.x < 60.0 - 2.0                                                  # dropped up to 4 m short
+    comfort = run(_COMFORT)
+    moving = [s for s in comfort.speeds if s > 0.0]
+    assert max(-step for step in _steps(moving)) <= 3.0 * 0.05 + 1e-4   # ~2.5 m/s2 (a little more at the very end)
+    assert moving[-1] <= 0.3 + 1e-6 and comfort.speeds[-1] == 0.0                         # then stops from a crawl
+    assert abs(comfort.location.x - 60.0) < 0.6                                           # stops on the point
+

@@ -114,6 +114,11 @@ class SimpleVehicleControl(BasicControl):
     # on dry asphalt. A tick that needs more (an obstacle first sensed too close, within obstacle_margin, a red light
     # seen too late) is stock -- its instant stop or target -- so the car avoids whatever stock avoids.
     MAX_NEEDED_DECELERATION = 9.0
+    # With comfort_deceleration the car brakes onto its path's last point: the point counts as reached this close
+    # (m), and the car covers the last bit at this crawl (m/s) -- braked to 0 short of the threshold it would stand
+    # there and never complete its path; from the crawl the final stop is gentle.
+    _END_REACHED_M = 0.5
+    _END_CREEP_MS = 0.3
     # s; the longest time one call may move the speed by under the comfort limits: a longer gap since the last
     # command (a car that stood at a reached goal, then got a new path) would otherwise allow the jump they prevent.
     _MAX_RATE_STEP_S = 0.25
@@ -421,15 +426,27 @@ class SimpleVehicleControl(BasicControl):
             else:
                 direction_norm = self._set_new_velocity(self._offset_waypoint(self._waypoints[0]))
                 reached_threshold = self._waypoint_reached_threshold
-                if self._timed_path and len(self._waypoints) == 1:
+                if len(self._waypoints) == 1 and (self._timed_path or (
+                        self._comfort_deceleration is not None and self._comfort_limited())):
                     # The last point of a timed path is due at its time: dropped at the reach
                     # threshold (4 m) it stopped the vehicle that far short and early, as much as
                     # 1.8 s on a 2 m/s path. The path's speed brings the vehicle there on time.
-                    reached_threshold = min(reached_threshold, 0.5)
+                    # With comfort_deceleration the car brakes onto the last point (_set_new_velocity)
+                    # and stops on it, not 4 m short at the speed it had there.
+                    reached_threshold = min(reached_threshold, self._END_REACHED_M)
                 if direction_norm < reached_threshold:
                     self._waypoints = self._waypoints[1:]
                     if not self._waypoints:
                         self._reached_goal = True
+
+    def _remaining_path_m(self):
+        """
+        Return the flat (XY) length of the path still to drive: to the next waypoint, then along the rest
+        """
+        total = self._xy_distance(self._waypoints[0].location)
+        for a, b in zip(self._waypoints, self._waypoints[1:]):
+            total += math.hypot(b.location.x - a.location.x, b.location.y - a.location.y)
+        return total
 
     def _xy_distance(self, location):
         """
@@ -544,8 +561,20 @@ class SimpleVehicleControl(BasicControl):
         comfort = self._comfort_limited()
         if comfort and red_light and self._comfort_deceleration is not None:
             needed_deceleration = max(needed_deceleration, self._red_light_deceleration(current_speed))
+        end_m = None    # m left to the path's end mark (comfort_deceleration brakes onto the last point)
+        if comfort and self._comfort_deceleration is not None and self._waypoints:
+            end_m = max(self._remaining_path_m() - self._END_REACHED_M, 0.0)
+            if current_speed > self._END_CREEP_MS:
+                # what stops it at the end mark from here; following the comfort curve tick by tick runs late
+                needed_deceleration = max(needed_deceleration, current_speed ** 2 / (2.0 * max(end_m, 0.05)))
         if needed_deceleration > self.MAX_NEEDED_DECELERATION:
             comfort = False         # more than the comfort limits may brake: this tick is stock
+        if comfort and end_m is not None:
+            # Brake onto the path's last point at comfort_deceleration (stock stopped dead on reaching it: a car
+            # behind then had to stop at once -- the Tartu lap's second motorbike, Allan 2026-11-24).
+            # It reaches the point (within the 0.5 m end threshold) at a crawl, then stops.
+            target_speed = min(target_speed, max(math.sqrt(2.0 * self._comfort_deceleration * end_m),
+                                                 self._END_CREEP_MS))
         # The speed this call steps from: the measured one (stock), the commanded one under the comfort limits
         speed = self._base_speed(current_speed) if comfort else current_speed
         # s; a gap longer than _MAX_RATE_STEP_S since the last command moves the speed by that much only
